@@ -1,0 +1,149 @@
+---
+title: "Lineage_score_correlations"
+author: "David Tatarakis"
+date: "10/10/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This code is for creating the lineage score correlation analysis plots in figure 3. The basic idea is to compute a correlation across all cells for each gene used in the CellAssign lineage predictions and the lienage scores themselves. This is done at each timepoint separately. We can see that for most genes the correlation rises sharply within the lineage score associated with that gene, while this is not true for scores not associated with that gene. This indicates an increasing specificity for the expression of these genes within the different emerging lineages, and argues for divergence and lineage commitment. 
+
+```{r}
+libraries <- c("Seurat", "dplyr", "ggplot2")
+lapply(libraries, FUN = library,character.only = TRUE)
+
+### read in final seurat object
+arch1 <- readRDS("E:/Arch1_single_cell/seurat_objects/Arch1_new_agg_filtered_noNT.RDS")
+
+### read in list of genes used to predict lineages with CellAssign (supplemental material)
+early_genes <- read.csv("E:/Arch1_single_cell/gene_lists/early_NC_genes.csv")
+pigment_genes <- read.csv("E:/Arch1_single_cell/gene_lists/pigment_genes.csv")
+skeletal_genes <- read.csv("E:/Arch1_single_cell/gene_lists/skeletal_genes.csv")
+neural_glial_genes <- read.csv("E:/Arch1_single_cell/gene_lists/neural_glial.genes.csv")
+
+object_list <- SplitObject(arch1, split.by = "orig.ident")
+object_list <- object_list[-6]
+
+##skeletal/neural_glial plots
+skeletal_neural_matrixlist <- list()
+for(i in 1:length(object_list)){
+  arch1 <- object_list[[i]]
+  cell_type_marker_normcounts <- as.data.frame(t(arch1@assays$RNA@data)) %>% 
+  select(c(skeletal_genes$x, neural_glial_genes$x))
+
+cell_type_marker_normcounts <- cell_type_marker_normcounts %>% 
+  dplyr::mutate(skeletal_score = arch1@meta.data$New.Skeletal.Score1) %>% 
+  dplyr::mutate(neural_glial_score = arch1@meta.data$New.Neural.Glial.Score1)
+
+cell_type_marker_cor_matrix <- as.data.frame(cor(cell_type_marker_normcounts)) %>%
+  select(c(skeletal_score, neural_glial_score)) %>%
+  filter(!is.na(skeletal_score) & !is.na(skeletal_score) & !is.na(neural_glial_score)) %>%
+  dplyr::mutate(gene = rownames(.)) %>%
+  mutate(signature = ifelse(gene %in% skeletal_genes$x, "skeletal", "neural_glial")) %>%
+  filter(gene %notin% c("neural_glial_score", "skeletal_score"))
+skeletal_neural_matrixlist[[i]] <- cell_type_marker_cor_matrix
+}
+
+plot_list <- list()
+label_list <- list("12 hpf", "14 hpf", "18 hpf", "20 hpf", "24 hpf")
+for(i in 1:length(skeletal_neural_matrixlist)) {
+cell_type_marker_cor_matrix_12 <- skeletal_neural_matrixlist[[i]]
+correlation12 <- cor.test(cell_type_marker_cor_matrix_12$skeletal_score, cell_type_marker_cor_matrix_12$neural_glial_score)
+p <- ggplot(data = cell_type_marker_cor_matrix_12, aes(x = skeletal_score, y = neural_glial_score)) +
+  geom_point(aes(color = signature)) +
+  theme_bw() +
+  ylim(c(-1, 1)) +
+  xlim(c(-1, 1)) +
+  xlab(label = "Skeletal Score Cor") +
+  ylab(label = "Neural/Glial Score Cor") +
+  ggtitle(label = as.character(label_list[[i]]), subtitle = paste0("R=", round(correlation12$estimate[[1]], digits = 2), ", ", "p=", formatC(correlation12$p.value, format = "e",digits = 2))) +
+  theme(legend.position = "none") + 
+  scale_color_manual(values=c("Goldenrod3", "DodgerBlue3"))
+plot_list[[i]] <- p
+}
+plot_list[[1]] + plot_list[[2]] + plot_list[[3]] + plot_list[[4]] + plot_list[[5]]
+
+##skeletal/pigment plots
+skeletal_pigment_matrixlist <- list()
+for(i in 1:length(object_list)){
+  arch1 <- object_list[[i]]
+  cell_type_marker_normcounts <- as.data.frame(t(arch1@assays$RNA@data)) %>% 
+  select(c(skeletal_genes$x, pigment_genes$x))
+
+cell_type_marker_normcounts <- cell_type_marker_normcounts %>% 
+  dplyr::mutate(skeletal_score = arch1@meta.data$New.Skeletal.Score1) %>% 
+  dplyr::mutate(pigment_score = arch1@meta.data$New.Pigment.Score1)
+
+cell_type_marker_cor_matrix <- as.data.frame(cor(cell_type_marker_normcounts)) %>%
+  select(c(skeletal_score, pigment_score)) %>%
+  filter(!is.na(skeletal_score) & !is.na(skeletal_score) & !is.na(pigment_score)) %>%
+  dplyr::mutate(gene = rownames(.)) %>%
+  mutate(signature = ifelse(gene %in% pigment_genes$x, "pigment", "skeletal")) %>%
+  filter(gene %notin% c("pigment_score", "skeletal_score"))
+skeletal_pigment_matrixlist[[i]] <- cell_type_marker_cor_matrix
+}
+
+plot_list <- list()
+label_list <- list("12 hpf", "14 hpf", "18 hpf", "20 hpf", "24 hpf")
+for(i in 1:length(skeletal_pigment_matrixlist)) {
+cell_type_marker_cor_matrix_12 <- skeletal_pigment_matrixlist[[i]]
+correlation12 <- cor.test(cell_type_marker_cor_matrix_12$skeletal_score, cell_type_marker_cor_matrix_12$pigment_score)
+p <- ggplot(data = cell_type_marker_cor_matrix_12, aes(x = skeletal_score, y = pigment_score)) +
+  geom_point(aes(color = signature)) +
+  theme_bw() +
+  ylim(c(-1, 1)) +
+  xlim(c(-1, 1)) +
+  xlab(label = "Skeletal Score Cor") +
+  ylab(label = "Pigment Score Cor") +
+  ggtitle(label = as.character(label_list[[i]]), subtitle = paste0("R=", round(correlation12$estimate[[1]], digits = 2), ", ", "p=", formatC(correlation12$p.value, format = "e",digits = 2))) +
+  theme(legend.position = "none") + 
+  scale_color_manual(values=c("mediumseagreen", "DodgerBlue3"))
+plot_list[[i]] <- p
+}
+plot_list[[1]] + plot_list[[2]] + plot_list[[3]] + plot_list[[4]] + plot_list[[5]]
+
+
+##neural_glial/pigment plots
+neural_glial_pigment_matrixlist <- list()
+for(i in 1:length(object_list)){
+  arch1 <- object_list[[i]]
+  cell_type_marker_normcounts <- as.data.frame(t(arch1@assays$RNA@data)) %>% 
+  select(c(neural_glial_genes$x, pigment_genes$x))
+
+cell_type_marker_normcounts <- cell_type_marker_normcounts %>% 
+  dplyr::mutate(neural_glial_score = arch1@meta.data$New.Neural.Glial.Score1) %>% 
+  dplyr::mutate(pigment_score = arch1@meta.data$New.Pigment.Score1)
+
+cell_type_marker_cor_matrix <- as.data.frame(cor(cell_type_marker_normcounts)) %>%
+  select(c(neural_glial_score, pigment_score)) %>%
+  filter(!is.na(neural_glial_score) & !is.na(neural_glial_score) & !is.na(pigment_score)) %>%
+  dplyr::mutate(gene = rownames(.)) %>%
+  mutate(signature = ifelse(gene %in% pigment_genes$x, "pigment", "neural_glial")) %>%
+  filter(gene %notin% c("pigment_score", "neural_glial_score"))
+neural_glial_pigment_matrixlist[[i]] <- cell_type_marker_cor_matrix
+}
+
+plot_list <- list()
+label_list <- list("12 hpf", "14 hpf", "18 hpf", "20 hpf", "24 hpf")
+for(i in 1:length(neural_glial_pigment_matrixlist)) {
+cell_type_marker_cor_matrix_12 <- neural_glial_pigment_matrixlist[[i]]
+correlation12 <- cor.test(cell_type_marker_cor_matrix_12$neural_glial_score, cell_type_marker_cor_matrix_12$pigment_score)
+p <- ggplot(data = cell_type_marker_cor_matrix_12, aes(x = neural_glial_score, y = pigment_score)) +
+  geom_point(aes(color = signature)) +
+  theme_bw() +
+  ylim(c(-1, 1)) +
+  xlim(c(-1, 1)) +
+  xlab(label = "Neural/Glial Score Cor") +
+  ylab(label = "Pigment Score Cor") +
+  ggtitle(label = as.character(label_list[[i]]), subtitle = paste0("R=", round(correlation12$estimate[[1]], digits = 2), ", ", "p=", formatC(correlation12$p.value, format = "e",digits = 2))) +
+  theme(legend.position = "none") + 
+  scale_color_manual(values=c("Goldenrod3", "mediumseagreen"))
+
+
+plot_list[[i]] <- p
+}
+plot_list[[1]] + plot_list[[2]] + plot_list[[3]] + plot_list[[4]] + plot_list[[5]]
+```
