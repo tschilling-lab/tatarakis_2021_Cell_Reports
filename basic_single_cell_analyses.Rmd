@@ -1,0 +1,685 @@
+---
+title: "basic_single-cel_analysis"
+author: "David Tatarakis"
+date: "10/25/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+###Generate the unfiltered and the filtered objects###
+```{r}
+library(dplyr)
+library(Seurat)
+library(pheatmap)
+library(ggplot2)
+library(ggpubr)
+library(reshape2)
+
+
+# Load the aggregated dataset
+Arch1_new_agg.data <- Read10X(data.dir = "/expression_matrices/aggregated")
+# Initialize the Seurat object with the raw (non-normalized data), assigning the appended number as the orig.ident for each cell.
+Arch1_new_agg <- CreateSeuratObject(counts = Arch1_new_agg.data, project = "Arch1", min.cells = 3, min.features = 200, names.field = 2, names.delim = "-" )
+Arch1_new_agg$orig.ident
+
+###creature a new metadata column for percent mitochodrial genes
+Arch1_new_agg[["percent.mt"]] <- PercentageFeatureSet(Arch1_new_agg, pattern = "^mt-")
+
+###check the distribution of counts, genes, and percent mito in all cells at each timepoint/group
+VlnPlot(Arch1_new_agg, c("nFeature_RNA","percent.mt"), pt.size = 0.2)
+
+###subset only the cells that meet certain cutoffs for number of genes and percentage mito genes
+Arch1_new_agg <- subset(Arch1_new_agg, subset = nFeature_RNA > 1500 & percent.mt < 4 & nFeature_RNA < 4000)
+
+###check again
+VlnPlot(Arch1_new_agg, c("nFeature_RNA","nCount_RNA","percent.mt"), group.by = "orig.ident", pt.size = 0.1)
+
+###set default assay to RNA
+DefaultAssay(object = Arch1_new_agg) <- "RNA"
+
+###perform normalization and PCA
+Arch1_new_agg<- NormalizeData(Arch1_new_agg)
+Arch1_new_agg<- FindVariableFeatures(Arch1_new_agg)
+Arch1_new_agg<- ScaleData(object = Arch1_new_agg, verbose = FALSE)
+Arch1_new_agg <- RunPCA(object = Arch1_new_agg, npcs = 30, verbose = FALSE)
+
+ElbowPlot(Arch1_new_agg)
+
+###perform clustering
+Arch1_new_agg <- FindNeighbors(object = Arch1_new_agg, dims = 1:13)
+Arch1_new_agg <- FindClusters(object = Arch1_new_agg, resolution = 0.4, method = "pca")
+
+###run dimensionality reductions
+Arch1_new_agg<- RunUMAP(object = Arch1_new_agg, reduction = "pca", 
+    dims = 1:13)
+
+#Rename cluster idents or orig idents
+current.origcluster.ids <- c(1, 2, 3, 4, 5, 6)
+new.origcluster.ids <- c("12hpf", "14hpf", "18hpf", "20hpf","24hpf", "30hpf")
+Arch1_new_agg@meta.data$orig.ident <- plyr::mapvalues(x = Arch1_new_agg@meta.data$orig.ident, from = current.origcluster.ids, to = new.origcluster.ids)
+
+DimPlot(Arch1_new_agg, reduction = "umap", label = T)
+DimPlot(Arch1_new_agg, reduction = "umap", group.by = "orig.ident")
+
+###find marker genes for each cluster
+Arch1_new_agg.markers <- FindAllMarkers(object = Arch1_new_agg, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.2)
+
+###make a heatmap of the top 10 markers in each cluster
+top8 <- Arch1_new_agg.markers %>% group_by(cluster) %>% top_n(n = 8, wt = avg_logFC)
+DoHeatmap(object = Arch1_new_agg, features = top8$gene) + scale_fill_gradientn(colours = rev(brewer.pal(11,"RdBu"))) + NoLegend()
+
+FeaturePlot(object = Arch1_new_agg, reduction = "umap", features = c("epcam", "pfn1", "cmlc1", "sox3"), ncol = 2 )
+
+FeaturePlot(object = Arch1_new_agg, reduction = "umap", features = c("sox10", "foxd3", "mitfa", "dlx2a", "barx1", "sox19a"), ncol = 3 )
+
+###assign cell types###
+DimPlot(Arch1_new_agg)
+Arch1_new_agg[["Cell.Type"]] <- Arch1_new_agg$seurat_clusters
+
+Idents(Arch1_new_agg) <- "Cell.Type"
+current.origcluster.ids <- c(0,1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
+new.origcluster.ids <- c("NC", "NC", "NC", "NC", "NC", "Neuro-Epithelium", "Endothelial", "NC", "NT", "NC", "Heart primordium", "Endothelial")
+Arch1_new_agg@meta.data$Cell.Type <- plyr::mapvalues(x = Arch1_new_agg@meta.data$Cell.Type, from = current.origcluster.ids, to = new.origcluster.ids)
+
+DimPlot(Arch1_new_agg, group.by = "Cell.Type")
+
+###Find cell type markers###
+cell.type.markers <- FindAllMarkers(Arch1_new_agg, min.pct = 0.2, logfc.threshold = 0.2, only.pos = T)
+
+cell.type.markers %>% group_by(cluster) %>% top_n(n = 30, wt = avg_logFC) -> top30
+cell.type.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_logFC) -> top10
+DoHeatmap(object = Arch1_new_agg, features = top10$gene, raster = F)+ scale_fill_gradientn(colours = rev(brewer.pal(11,"RdBu"))) + NoLegend()
+
+
+### select only the NC and NT###
+
+Arch1_new_agg_filtered <- subset(Arch1_new_agg, idents = c("NC", "NT"))
+
+DefaultAssay(object = Arch1_new_agg_filtered) <- "RNA"
+
+###perform normalization and PCA
+Arch1_new_agg_filtered<- NormalizeData(Arch1_new_agg_filtered)
+Arch1_new_agg_filtered<- FindVariableFeatures(Arch1_new_agg_filtered)
+Arch1_new_agg_filtered<- ScaleData(object = Arch1_new_agg_filtered, verbose = FALSE)
+Arch1_new_agg_filtered <- RunPCA(object = Arch1_new_agg_filtered, npcs = 30, verbose = FALSE)
+
+ElbowPlot(Arch1_new_agg_filtered)
+
+###perform clustering
+Arch1_new_agg_filtered <- FindNeighbors(object = Arch1_new_agg_filtered, dims = 1:10)
+Arch1_new_agg_filtered <- FindClusters(object = Arch1_new_agg_filtered, resolution = 0.5, method = "pca")
+
+###run dimensionality reductions
+Arch1_new_agg_filtered<- RunUMAP(object = Arch1_new_agg_filtered, reduction = "pca", 
+    dims = 1:10)
+
+###create 2D plots for dimensionality reduction
+DimPlot(Arch1_new_agg_filtered, reduction = "umap", label = T)
+DimPlot(Arch1_new_agg_filtered, reduction = "umap", group.by = "orig.ident")
+
+
+###Select out the NT###
+Arch1_new_agg_filtered_noNT <- subset(Arch1_new_agg_filtered, idents = c(0,1,2,3,4,5,7,8,10))
+
+###redo analysis on final filtered object containing only NC cells###
+###perform normalization and PCA
+Arch1_new_agg_filtered_noNT<- NormalizeData(Arch1_new_agg_filtered_noNT)
+Arch1_new_agg_filtered_noNT<- FindVariableFeatures(Arch1_new_agg_filtered_noNT)
+Arch1_new_agg_filtered_noNT<- ScaleData(object = Arch1_new_agg_filtered_noNT, verbose = FALSE)
+Arch1_new_agg_filtered_noNT <- RunPCA(object = Arch1_new_agg_filtered_noNT, npcs = 30, verbose = FALSE)
+ElbowPlot(Arch1_new_agg_filtered_noNT)
+
+###perform clustering
+Arch1_new_agg_filtered_noNT <- FindNeighbors(object = Arch1_new_agg_filtered_noNT, dims = 1:5)
+Arch1_new_agg_filtered_noNT <- FindClusters(object = Arch1_new_agg_filtered_noNT, resolution = 1.0, method = "pca")
+
+###run dimensionality reductions
+Arch1_new_agg_filtered_noNT<- RunUMAP(object = Arch1_new_agg_filtered_noNT, reduction = "pca", 
+    dims = 1:5)
+
+###create 2D plots for dimensionality reduction
+DimPlot(Arch1_new_agg_filtered_noNT, reduction = "umap", label = T)
+DimPlot(Arch1_new_agg_filtered_noNT, reduction = "umap", group.by = "orig.ident")
+
+
+saveRDS(Arch1_new_agg, file = "")
+
+saveRDS(Arch1_new_agg_filtered_noNT, file = "")
+```
+
+###Add module scores for 
+```{r}
+early_genes <- read.csv("gene_lists/early_NC_genes.csv")
+pigment_genes <- read.csv("gene_lists/pigment_genes.csv")
+skeletal_genes <- read.csv("gene_lists/skeletal_genes.csv")
+neural_glial_genes <- read.csv("gene_lists/neural_glial.genes.csv")
+
+Arch1_new_agg_filtered_noNT <- AddModuleScore(Arch1_new_agg_filtered_noNT, features = list(as.character(early_genes$x)), name = "New.Early.NC.Score")
+Arch1_new_agg_filtered_noNT <- AddModuleScore(Arch1_new_agg_filtered_noNT, features = list(as.character(pigment_genes$x)), name = "New.Pigment.Score")
+Arch1_new_agg_filtered_noNT <- AddModuleScore(Arch1_new_agg_filtered_noNT, features = list(as.character(skeletal_genes$x)), name = "New.Skeletal.Score")
+Arch1_new_agg_filtered_noNT <- AddModuleScore(Arch1_new_agg_filtered_noNT, features = list(as.character(neural_glial_genes$x)), name = "New.Neural.Glial.Score")
+```
+
+
+###PAGA plot coordinates for plotting###
+```{r}
+PAGA_coordinates <- read.table("figure_coordinates/paga_coord.txt", sep = ",", header = T)
+rownames(PAGA_coordinates) <- PAGA_coordinates$cell_id
+colnames(PAGA_coordinates) <- c("Cell", "tSNE_1", "tSNE_2")
+PAGA_coordinates <- PAGA_coordinates[,-1]
+
+###tsne embedding now has PAGA coordinates###
+Arch1_new_agg_filtered_noNT@reductions$tsne@cell.embeddings <- as.matrix(PAGA_coordinates)
+
+
+###plots###
+DimPlot(Arch1_new_agg_filtered_noNT, reduction = "tsne") + NoLegend()
+FeaturePlot(Arch1_new_agg_filtered_noNT, "New.Skeletal.Score1", reduction = "tsne") + NoLegend() + scale_colour_gradientn(colours = brewer.pal(n = 9, name = "OrRd"))
+FeaturePlot(Arch1_new_agg_filtered_noNT, "New.Early.NC.Score1", reduction = "tsne") + NoLegend() + scale_colour_gradientn(colours = brewer.pal(n = 9, name = "OrRd"))
+FeaturePlot(Arch1_new_agg_filtered_noNT, "New.Neural.Glial.Score1", reduction = "tsne") + NoLegend() + scale_colour_gradientn(colours = brewer.pal(n = 9, name = "OrRd"))
+FeaturePlot(Arch1_new_agg_filtered_noNT, "New.Pigment.Score1", reduction = "tsne") + NoLegend() + scale_colour_gradientn(colours = brewer.pal(n = 9, name = "OrRd"))
+
+saveRDS(Arch1_new_agg_filtered_noNT, file = "seurat_objects/Arch1_new_agg_filtered_noNT.RDS")
+
+###individual genes###
+
+FeaturePlot(Arch1_new_agg_filtered_noNT, "tfap2a", reduction = "tsne") + NoLegend()
+FeaturePlot(Arch1_new_agg_filtered_noNT, "mitfa", reduction = "tsne") + NoLegend()
+FeaturePlot(Arch1_new_agg_filtered_noNT, "dlx2a", reduction = "tsne") + NoLegend()
+FeaturePlot(Arch1_new_agg_filtered_noNT, "foxd3", reduction = "tsne") + NoLegend()
+FeaturePlot(Arch1_new_agg_filtered_noNT, "foxd1", reduction = "tsne") + NoLegend()
+FeaturePlot(Arch1_new_agg_filtered_noNT, "dlx2a", reduction = "tsne") + NoLegend()
+FeaturePlot(Arch1_new_agg_filtered_noNT, "sox10", reduction = "tsne") + NoLegend()
+FeaturePlot(Arch1_new_agg_filtered_noNT, "cxcl12b", reduction = "tsne") + NoLegend()
+FeaturePlot(Arch1_new_agg_filtered_noNT, "krt18.1", reduction = "tsne") + NoLegend()
+FeaturePlot(Arch1_new_agg_filtered_noNT, "phlda1", reduction = "tsne") + NoLegend()
+FeaturePlot(Arch1_new_agg_filtered_noNT, "phlda3", reduction = "tsne") + NoLegend()
+FeaturePlot(Arch1_new_agg_filtered_noNT, "atp6ap2", reduction = "tsne") + NoLegend()
+FeaturePlot(Arch1_new_agg_filtered_noNT, "sox11a", reduction = "tsne") + NoLegend()
+
+```
+
+
+
+###Figure 1 plots###
+```{r}
+Arch1_new_agg <- readRDS("seurat_objects/Arch1_aggregate_unfiltered.RDS")
+Arch1_new_agg_filtered_noNT <- readRDS("seurat_objects/Arch1_new_agg_filtered_noNT.RDS")
+
+###Figure 1C###
+DimPlot(Arch1_new_agg, group.by = "Cell.Type")
+
+###Figure 1D###
+DimPlot(Arch1_new_agg_filtered_noNT, group.by = "orig.ident")
+
+###Figure 1E###
+Idents(Arch1_new_agg_filtered_noNT) <- "orig.ident"
+timepoint_markers <- FindAllMarkers(Arch1_new_agg_filtered_noNT, logfc.threshold = 0.2, min.diff.pct = 0.2, only.pos = T)
+
+top4_timpoint_markers <- timepoint_markers %>% group_by(cluster) %>% top_n(n=4, wt = avg_logFC)
+top4_timpoint_markers.list <- top4_timpoint_markers$gene
+top4_timpoint_markers.list.2 <- replace(top4_timpoint_markers.list, c(3, 4, 7, 8, 19, 20), c("sox10", "foxd3","twist1b", "hspb1", "dlx2a","dlx3b"))
+
+top4_average <- AverageExpression(Arch1_new_agg_filtered_noNT, features = top4_timpoint_markers.list.2)
+
+pheatmap(top4_average$RNA, scale = "row", cluster_cols = F, cluster_rows = F)
+
+###Figure 1F###
+FeaturePlot(Arch1_new_agg_filtered_noNT, "sox10")
+FeaturePlot(Arch1_new_agg_filtered_noNT, "mitfa")
+FeaturePlot(Arch1_new_agg_filtered_noNT, "col2a1b")
+
+```
+
+###Figure S1 plots###
+```{r}
+###find marker genes for each cell type
+Idents(Arch1_new_agg) <- "Cell.Type"
+
+cell_types_totals <- as.data.frame(table(Arch1_new_agg@meta.data$Cell.Type, Arch1_new_agg@meta.data$orig.ident))
+colnames(cell_types_totals)[1] <- "Cell.Type"
+colnames(cell_types_totals)[2] <- "Timepoint"
+colnames(cell_types_totals)[3] <- "Count"
+cell_types_precentages <- cell_types_totals %>% dplyr::group_by(Timepoint) %>% dplyr::mutate(Percentage = Count/sum(Count)*100)
+ggplot(data = cell_types_precentages, aes(x = Timepoint, y = Percentage, fill = Cell.Type)) + geom_bar(stat = "identity") + theme_bw()
+
+
+Arch1_unfiltered.markers <- FindAllMarkers(Arch1_new_agg, logfc.threshold = 0.2, min.diff.pct = 0.4, only.pos = T)
+
+cell_types_top8 <- Arch1_unfiltered.markers %>% group_by(cluster) %>% top_n(n=8, wt = avg_logFC)
+
+DoHeatmap(Arch1_new_agg, features = cell_types_top8$gene, raster = F)
+
+FeaturePlot(Arch1_unfiltered, "sox19a", pt.size = 1) + NoLegend()
+FeaturePlot(Arch1_unfiltered, "cmlc1", pt.size = 1) + NoLegend()
+FeaturePlot(Arch1_unfiltered, "epcam", pt.size = 1) + NoLegend()
+FeaturePlot(Arch1_unfiltered, "spi1b", pt.size = 1) + NoLegend()
+FeaturePlot(Arch1_unfiltered, "twist1a", pt.size = 1) + NoLegend()
+FeaturePlot(Arch1_unfiltered, "tfap2a", pt.size = 1) + NoLegend()
+
+
+
+FeaturePlot(Arch1_new_agg, "sox10")
+
+FeaturePlot(Arch1_new_agg, "twist1a")
+
+FeaturePlot(Arch1_new_agg, "epcam")
+
+FeaturePlot(Arch1_new_agg, "sox3")
+
+FeaturePlot(Arch1_new_agg, "cmlc1")
+
+FeaturePlot(Arch1_new_agg, "spi1b")
+
+selected_genes <- cell_types_top8$gene
+selected_genes <- replace(selected_genes, c(3,25, 26), c("sox10","sox3", "sox19a"))
+selected_genes_average <- AverageExpression(Arch1_new_agg, features = selected_genes)
+selected_genes_average_ordered <- selected_genes_average$RNA[,c(1,2,4,5,3)]
+ 
+pheatmap(selected_genes_average_ordered, scale = "row", cluster_cols = F)
+```
+
+###Analysis using TFs to run dimensionality reduction and clustering###
+```{r}
+cells.to.keep <- rownames(Arch1_new_agg_filtered_noNT@meta.data)
+
+###read in a list of a ll human TFs and convert it to zebrafish homologs###
+gene.list <- as.character(read.table("~/Documents/human_TF.txt",header=F)$V1)
+genesV2 = getLDS(attributes = c("hgnc_symbol"),
+                   filters = "hgnc_symbol",
+                   values = gene.list ,
+                   mart = human,
+                   attributesL = c("zfin_id_symbol"),
+                   martL = zebrafish, uniqueRows=T)
+
+zebrafishx <- unique(genesV2)
+zebrafish.gene.list <- zebrafishx$ZFIN.symbol
+
+genes.to.keep <- zebrafish.gene.list
+
+Arch1_new_agg.data <- Read10X(data.dir = "expression_matrices/aggregated")
+
+###make a new 10x matrix that only contains the TFs from the above list, then keep only the cells that were kept in the previous analysis, and then generate a new Seurat object###
+TF_only_Arch1 <- Arch1_new_agg.data[which(rownames(Arch1_new_agg.data) %in% c(genes.to.keep)), 
+                                    which(colnames(Arch1_new_agg.data) %in% cells.to.keep)]
+Arch1_TF_filtered <- CreateSeuratObject(counts = TF_only_Arch1, project = "TF", min.cells = 3, min.features = 0, names.field = 2, names.delim = "-" )
+
+###do all preprocessing and dimensionality reductions###
+Arch1_TF_filtered <- NormalizeData(Arch1_TF_filtered)
+Arch1_TF_filtered <- FindVariableFeatures(Arch1_TF_filtered)
+Arch1_TF_filtered <- ScaleData(Arch1_TF_filtered)
+Arch1_TF_filtered <- RunPCA(Arch1_TF_filtered)
+
+Arch1_TF_filtered <- FindNeighbors(Arch1_TF_filtered, dims = 1:7)
+Arch1_TF_filtered <- FindClusters(Arch1_TF_filtered, resolution = 0.5)
+Arch1_TF_filtered <- RunUMAP(Arch1_TF_filtered, dims = 1:7)
+DimPlot(Arch1_TF_filtered)
+DimPlot(Arch1_TF_filtered, group.by = "orig.ident")
+
+
+###make a new object with all of the genes from the original object, but with UMAP embeddings and clustering from the TF only object### 
+Arch1_new_agg_filtered_tf_only <- Arch1_new_agg_filtered
+Arch1_new_agg_filtered[["TF_clusters"]] <- Arch1_TF_filtered$seurat_clusters
+Arch1_new_agg_filtered_tf_only[["TF_clusters"]] <- Arch1_TF_filtered$seurat_clusters
+Arch1_new_agg_filtered_tf_only@reductions$umap@cell.embeddings <- Arch1_TF_filtered@reductions$umap@cell.embeddings
+
+###transfer over meta data (seurat clusters) from full object to the tf only object###
+Arch1_TF_filtered@meta.data <- Arch1_new_agg_filtered@meta.data
+
+TF_markers <- FindAllMarkers(Arch1_TF_filtered, only.pos = T)
+TF.clusters.markers <- FindAllMarkers(Arch1_new_agg_filtered_tf_only, only.pos = T)
+
+
+Arch1_new_agg_tf_reductions <- Arch1_new_agg_filtered_tf_only
+###save these new objects###
+saveRDS(Arch1_TF_filtered, file = "/Users/davidtatarakis/Documents/Schilling_Lab/Single_Cell_paper/Arch1_single_cell/Arch1_agg_v11/Arch1_TF_filtered.RDS")
+saveRDS(Arch1_new_agg_tf_reductions, file = "/Users/davidtatarakis/Documents/Schilling_Lab/Single_Cell_paper/Arch1_single_cell/Arch1_agg_v11/Arch1_new_agg_tf_reductions.RDS")
+
+
+
+Arch1_new_agg_tf_reductions <- readRDS("seurat_objects/Arch1_new_agg_tf_reductions.RDS")
+Arch1_TF_only <- readRDS("seurat_objects/Arch1_TF_filtered.RDS")
+
+DimPlot(Arch1_new_agg_tf_reductions, group.by = "seurat_clusters")
+DimPlot(Arch1_new_agg_tf_reductions, group.by = "TF_clusters")
+DimPlot(Arch1_TF_only)
+```
+
+###Monocle Analysis on TF object###
+```{r}
+Arch1_TF_only_seurat <- Arch1_TF_only
+
+###read in the data from the seurat object
+Arch1_TF_only_data<-as.data.frame(rownames(Arch1_TF_only_seurat@meta.data))
+
+rownames(Arch1_TF_only_data)<-Arch1_TF_only_data$`rownames(Arch1_TF_only_seurat@meta.data)`
+
+DefaultAssay(Arch1_TF_only_seurat) <- "RNA"
+
+indata.Arch1_TF_only_data<-GetAssayData(Arch1_TF_only_seurat, slot = "counts")
+
+gene.info.Arch1_TF_only_data<-as.data.frame(rownames(indata.Arch1_TF_only_data))
+
+rownames(gene.info.Arch1_TF_only_data)<-gene.info.Arch1_TF_only_data$`rownames(indata.Arch1_TF_only_data)`
+
+names(gene.info.Arch1_TF_only_data)<-"gene_short_name"
+
+
+###create the Monocle3 object and run dimensionality reduction and trajectory analysis
+Arch1_TFs.cds <- new_cell_data_set(indata.Arch1_TF_only_data,
+                               cell_metadata = Arch1_TF_only_seurat@meta.data,gene_metadata = gene.info.Arch1_TF_only_data)
+Arch1_TFs.cds <- preprocess_cds(cds = Arch1_TFs.cds, method = "PCA")
+Arch1_TFs.cds <- reduce_dimension(cds = Arch1_TFs.cds,reduction_method = "UMAP",umap.min_dist = 0.35)
+Arch1_TFs.cds <-cluster_cells(cds = Arch1_TFs.cds, reduction_method = "UMAP")
+Arch1_TFs.cds <- learn_graph(Arch1_TFs.cds,learn_graph_control = list(minimal_branch_len = 3, prune_graph = T, geodesic_distance_ratio = 0.1), close_loop = T)
+plot_cells(Arch1_TFs.cds, reduction_method = "UMAP", color_cells_by = "orig.ident", cell_size = 1)
+
+###select root cells for pseudotime
+Arch1_TFs.cds <- order_cells(Arch1_TFs.cds)
+
+###plot pseudotime###
+plot_cells(Arch1_TFs.cds, color_cells_by = "TF_clusters",graph_label_size = 0, cell_size = 1)
+plot_cells(Arch1_TFs.cds, color_cells_by = "orig.ident",graph_label_size = 0, cell_size = 1)
+plot_cells(Arch1_TFs.cds, color_cells_by = "pseudotime",graph_label_size = 0, cell_size = 1)
+
+###find DE genes across trajectory###
+cds_pr_test_res <- graph_test(Arch1_TFs.cds, neighbor_graph="principal_graph", cores=1)
+
+genes <- as.character(cds_pr_test_res$gene_short_name)
+test <- as.data.frame(Arch1_TF_only_seurat@assays$RNA@data[genes,])
+test2 <- test %>% mutate(pct.exp = rowSums(. > 0)/ncol(test))
+pct.exp <- as.data.frame(test2$pct.exp)
+pct.exp$gene <- rownames(pct.exp)
+colnames(pct.exp)[1] <- "pct.exp"
+genes.to.keep <- pct.exp[which(pct.exp$pct.exp >0.05),2]
+
+#spr_deg_ids <- row.names(subset(cds_pr_test_res, q_value < 0.00001 & gene_short_name %in% genes.to.keep))
+spr_deg_ids <- row.names(subset(cds_pr_test_res, morans_test_statistic > 10 & gene_short_name %in% genes.to.keep))
+
+
+###organize into modules###
+gene_module_df <- find_gene_modules(Arch1_TFs.cds[spr_deg_ids,], resolution=0.6)
+
+###plot gene modules###
+cell_IDs <- as.vector(Arch1_TFs.cds@colData@listData$orig.ident)
+cell_group_df <- tibble::tibble(cell=row.names(colData(Arch1_TFs.cds)), 
+                                cell_group=cell_IDs)
+agg_mat <- aggregate_gene_expression(cds = Arch1_TFs.cds, gene_module_df, cell_group_df)
+
+
+gene_module_df %>% group_by(module) %>%
+                      filter(module %in% c(1,2,4,6,7,8)) -> trajectory_genes
+trajectory_genes <- group_by(trajectory_genes, module)
+write.csv(trajectory_genes, file = "C:/Users/David Tatarakis/Documents/Monocle_Analysis/Arch1_TFs/Monocle_UMAP/trajectory_genes.csv")   
+```
+
+
+###Figure 2 Plots###
+```{r}
+###Figure 2A/B###
+plot_cells(Arch1_TFs.cds, color_cells_by = "orig.ident",graph_label_size = 0, cell_size = 1)
+
+###Figure 2C###
+plot_cells(Arch1_TFs.cds, color_cells_by = "TF_clusters",graph_label_size = 0, cell_size = 1)
+
+
+###Figure 2D###
+Arch1_TFs.cds <- order_cells(Arch1_TFs.cds)
+plot_cells(Arch1_TFs.cds, color_cells_by = "pseudotime",graph_label_size = 0, cell_size = 1)
+
+###Figure 2F###
+plots <- list()
+
+for(i in 1:8) {
+  plots[[i]] <- plot_cells(Arch1_TFs.cds,
+           genes=gene_module_df %>% filter(module %in% c(i)),
+           label_cell_groups=FALSE,
+           show_trajectory_graph=T,
+           cell_size = 1,
+           label_branch_points = F,
+           label_roots = F,
+           label_leaves = F) 
+  }
+plots
+###Figure 2E###
+trajectory_genes.mat <- read.csv("trajectory_genes.csv", header = T)
+trajectory_genes <- as.character(trajectory_genes.mat$id)
+test_matrix <- as.matrix(Arch1_new_agg_filtered_noNT@assays$RNA@data[trajectory_genes,])
+pheatmap(cor(t(test_matrix)), show_rownames = F, show_colnames = F, clustering_method = "complete")
+
+```
+
+#figure S2 plots
+```{r}
+Idents(Arch1_new_agg_filtered_noNT) <- "guided_cell_type"
+cellassign_averages <- AverageExpression(Arch1_new_agg_filtered_noNT)
+
+averages_matrix <- cellassign_averages$RNA[,c(1,3,4,5,2)]
+
+markers <- c(as.character(early_genes$x), as.character(pigment_genes$x), as.character(skeletal_genes$x), as.character(neural_glial_genes$x))
+#color = brewer.pal(n=9, name = "YlOrRd")
+pheatmap(averages_matrix[unique(markers),], cluster_cols = F, scale = "row", clustering_method = "ward.D2", color = rev(heat.colors(50)))
+```
+
+
+###analysis on new larger 18hpf dataset###
+```{r}
+Arch1_18new.data <- Read10X(data.dir = "expression_matrices/18hpf_alt")
+
+Arch1_18new <- CreateSeuratObject(counts = Arch1_18new.data, project = "new18hpf", min.cells = 3, min.features = 200)
+
+Arch1_18new[["percent.mt"]] <- PercentageFeatureSet(Arch1_18new, pattern = "^mt-")
+
+###check the distribution of counts, genes, and percent mito in all cells at each timepoint/group
+VlnPlot(Arch1_18new, c("nFeature_RNA","nCount_RNA","percent.mt"), pt.size = 0.0, group.by = "orig.ident")
+
+###remove low expressing cells and high mt % cells
+Arch1_18new <- subset(Arch1_18new, subset = nFeature_RNA > 2000 & percent.mt < 5 & nFeature_RNA < 6000)
+
+VlnPlot(Arch1_18new, c("nFeature_RNA","nCount_RNA","percent.mt"), pt.size = 0, group.by = "orig.ident")
+
+###set default assay to RNA
+DefaultAssay(object = Arch1_18new) <- "RNA"
+
+###perform normalization and PCA
+Arch1_18new<- NormalizeData(Arch1_18new)
+Arch1_18new<- FindVariableFeatures(Arch1_18new)
+Arch1_18new<- ScaleData(object = Arch1_18new, verbose = FALSE)
+Arch1_18new <- RunPCA(object = Arch1_18new, npcs = 30, verbose = FALSE)
+
+
+ElbowPlot(object = Arch1_18new)
+
+###perform clustering
+Arch1_18new <- FindNeighbors(object = Arch1_18new, dims = 1:11)
+Arch1_18new <- FindClusters(object = Arch1_18new, resolution = 0.5, method = "pca")
+
+
+###run dimensionality reductions
+Arch1_18new<- RunUMAP(object = Arch1_18new, reduction = "pca", 
+    dims = 1:11)
+Arch1_18new<- RunTSNE(object = Arch1_18new, reduction = "pca", 
+    dims = 1:11)
+
+
+###create 2D plots for dimensionality reduction
+DimPlot(Arch1_18new, reduction = "umap", label = T)
+
+###find marker genes for each cluster
+Arch1_18new.markers <- FindAllMarkers(object = Arch1_18new, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.2)
+
+###make a heatmap of the top 5 markers in each cluster
+Arch1_18new.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_logFC) -> top10
+DoHeatmap(object = Arch1_18new, features = top10$gene) + NoLegend()
+
+FeaturePlot(object = Arch1_18new, reduction = "umap", features = c("sox10", "twist1a", "epcam", "pax3a", "mitfa", "pfn1"), ncol = 3 )
+
+###create a new object with only the desired clusters
+Arch1_18new_filtered <- subset(Arch1_18new, idents = c(0,3,7,9))
+
+###save the object
+saveRDS(object = Arch1_18new_filtered, file = "/Users/davidtatarakis/Documents/Schilling_Lab/Single_Cell_paper/Arch1_single_cell/genome11_files/18hpf_alt/Seurat_analysis/18hpf_new_filtered.RDS")
+
+saveRDS(object = Arch1_18new, file = "/Users/davidtatarakis/Documents/Schilling_Lab/Single_Cell_paper/Arch1_single_cell/genome11_files/18hpf_alt/Seurat_analysis/18hpf_new_unfiltered.RDS")
+
+DefaultAssay(object = Arch1_18new_filtered) <- "RNA"
+
+###perform normalization and PCA
+Arch1_18new_filtered<- NormalizeData(Arch1_18new_filtered)
+Arch1_18new_filtered<- FindVariableFeatures(Arch1_18new_filtered)
+Arch1_18new_filtered<- ScaleData(object = Arch1_18new_filtered, verbose = FALSE)
+Arch1_18new_filtered <- RunPCA(object = Arch1_18new_filtered, npcs = 30, verbose = FALSE)
+
+
+ElbowPlot(object = Arch1_18new_filtered)
+
+###perform clustering
+Arch1_18new_filtered <- FindNeighbors(object = Arch1_18new_filtered, dims = 1:11)
+Arch1_18new_filtered <- FindClusters(object = Arch1_18new_filtered, resolution = 0.5, method = "pca")
+
+
+###run dimensionality reductions
+Arch1_18new_filtered<- RunUMAP(object = Arch1_18new_filtered, reduction = "pca", 
+    dims = 1:11)
+Arch1_18new_filtered<- RunTSNE(object = Arch1_18new_filtered, reduction = "pca", 
+    dims = 1:11)
+Arch1_18new_filtered <- CellCycleScoring(Arch1_18new_filtered, s.features = as.character(zf.s.genes$x), g2m.features = as.character(zf.g2m.genes$x), set.ident = F)
+
+```
+
+###18 hpf PAGA plot coordinates for plotting###
+```{r}
+PAGA_coordinates_18 <- read.table("18hpf/paga_coord.txt", sep = ",", header = T)
+rownames(PAGA_coordinates_18) <- PAGA_coordinates_18$cell_id
+colnames(PAGA_coordinates_18) <- c("Cell", "tSNE_1", "tSNE_2")
+PAGA_coordinates_18 <- PAGA_coordinates_18[,-1]
+
+###tsne embedding now has PAGA coordinates###
+Arch1_18@reductions$tsne@cell.embeddings <- as.matrix(PAGA_coordinates_18)
+
+###soup cluster IDs###
+soup_clusters <- read.table("18hpf/soup_cluster.txt", sep = ",", header = T)
+Arch1_18[["soup.clusters"]] <- soup_clusters$soup_cluster
+DimPlot(Arch1_18, group.by = "soup.clusters", reduction = "tsne", cols = brewer.pal(n = 4, name = "Paired")) + NoLegend()
+
+###cell cycle scoring###
+Arch1_18 <- CellCycleScoring(Arch1_18, s.features = zf.s.genes$x,g2m.features = zf.g2m.genes$x)
+DimPlot(Arch1_18, group.by = "Phase", reduction = "tsne")
+VlnPlot(Arch1_18, group.by = "soup.clusters", features = "S.Score")
+VlnPlot(Arch1_18, group.by = "soup.clusters", features = "G2M.Score")
+
+###find markers between two skeletal clusters###
+Idents(Arch1_18) <- "soup.clusters"
+cluster_0_1_markers <- FindMarkers(Arch1_18, ident.1 = "0", ident.2 = "1")
+
+
+###entropy###
+entropy <- read.table("18hpf/soup_entropy.txt", sep = ",", header = T)
+Arch1_18[["entropy"]] <- entropy$soup_entropy
+FeaturePlot(Arch1_18, "entropy", reduction = "tsne", min.cutoff = 0, cols = viridis(50)) + NoLegend()
+FeaturePlot(Arch1_18, "entropy", reduction = "umap", min.cutoff = 0, cols = viridis(50), pt.size = 2) + NoLegend()
+
+
+###assign module scores for cell types###
+Arch1_18 <- AddModuleScore(Arch1_18, features = list(as.character(early_genes$x)), name = "New.Early.NC.Score")
+Arch1_18 <- AddModuleScore(Arch1_18, features = list(as.character(pigment_genes$x)), name = "New.Pigment.Score")
+Arch1_18 <- AddModuleScore(Arch1_18, features = list(as.character(skeletal_genes$x)), name = "New.Skeletal.Score")
+Arch1_18 <- AddModuleScore(Arch1_18, features = list(as.character(neural_glial_genes$x)), name = "New.Neural.Glial.Score")
+
+###assign module scores for soup cluster assignemnts###
+soup_cluster_assignments <- read.csv("18hpf/soup_membership_k=4.csv", header = T)
+Arch1_18[["cluster0_assignment"]] <- soup_cluster_assignments$X1
+Arch1_18[["cluster1_assignment"]] <- soup_cluster_assignments$X2
+Arch1_18[["cluster2_assignment"]] <- soup_cluster_assignments$X3
+Arch1_18[["cluster3_assignment"]] <- soup_cluster_assignments$X4
+
+###plots###
+DimPlot(Arch1_18, reduction = "tsne") + NoLegend()
+FeaturePlot(Arch1_18, "New.Skeletal.Score1", reduction = "umap", cols = viridis(50), pt.size = 2) + NoLegend()
+FeaturePlot(Arch1_18, "New.Early.NC.Score1", reduction = "umap", cols = viridis(50), pt.size = 2) + NoLegend() 
+FeaturePlot(Arch1_18, "New.Neural.Glial.Score1", reduction = "umap", cols = viridis(50), pt.size = 2) + NoLegend()
+FeaturePlot(Arch1_18, "New.Pigment.Score1", reduction = "umap", cols = viridis(50), pt.size = 2) + NoLegend()
+FeaturePlot(Arch1_18, "cluster0_assignment", reduction = "tsne", cols = viridis(50)) + NoLegend()
+FeaturePlot(Arch1_18, "cluster1_assignment", reduction = "tsne", cols = viridis(50)) + NoLegend()
+FeaturePlot(Arch1_18, "cluster2_assignment", reduction = "tsne", cols = viridis(50)) + NoLegend()
+FeaturePlot(Arch1_18, "cluster3_assignment", reduction = "tsne", cols = viridis(50)) + NoLegend()
+
+
+###score boxplots using soup clusters###
+ggplot(Arch1_18@meta.data, aes(x = soup.clusters, y = New.Skeletal.Score1, fill = as.character(soup.clusters))) + geom_boxplot() + scale_fill_brewer(palette="Paired") + theme_bw()
+ggplot(Arch1_18@meta.data, aes(x = soup.clusters, y = New.Early.NC.Score1, fill = as.character(soup.clusters))) + geom_boxplot() + scale_fill_brewer(palette="Paired") + theme_bw()
+ggplot(Arch1_18@meta.data, aes(x = soup.clusters, y = New.Pigment.Score1, fill = as.character(soup.clusters))) + geom_boxplot() + scale_fill_brewer(palette="Paired") + theme_bw()
+ggplot(Arch1_18@meta.data, aes(x = soup.clusters, y = New.Neural.Glial.Score1, fill = as.character(soup.clusters))) + geom_boxplot() + scale_fill_brewer(palette="Paired") + theme_bw()
+ggplot(Arch1_18@meta.data, aes(x = soup.clusters, y = S.Score, fill = as.character(soup.clusters))) + geom_boxplot() + scale_fill_brewer(palette="Paired") + theme_bw()
+ggplot(Arch1_18@meta.data, aes(x = soup.clusters, y = G2M.Score, fill = as.character(soup.clusters))) + geom_boxplot() + scale_fill_brewer(palette="Paired") + theme_bw()
+
+
+###individual genes###
+FeaturePlot(Arch1_18, "tfap2a", reduction = "umap", pt.size = 2) + NoLegend()
+FeaturePlot(Arch1_18, "foxd1", reduction = "umap", pt.size = 2) + NoLegend()
+FeaturePlot(Arch1_18, "barx1", reduction = "umap", pt.size = 2) + NoLegend()
+FeaturePlot(Arch1_18, "foxd3", reduction = "umap", pt.size = 2) + NoLegend()
+FeaturePlot(Arch1_18, "msx1b", reduction = "umap", pt.size = 2) + NoLegend()
+
+saveRDS(Arch1_18, file = "seurat_objects/Arch1_18hpf_final.RDS")
+
+```
+
+
+###Figure 3 plots###
+```{r}
+Arch1_18 <- readRDS("seurat_objects/Arch1_18hpf_final.RDS")
+
+Arch1_18[["David.new.clusters"]] <- Arch1_18@active.ident
+###new clustering###
+Arch1_18 <- FindClusters(object = Arch1_18, resolution = 1, method = "pca")
+old.IDs <- as.character(c(1,2,3,4,5))
+new.IDs <- as.character(c(3,1,4,2,5))
+old.idents <- c(1,2,3,4,5)
+new.idents <- c("Transitional","Pigment","Skeletal1","Skeletal2","OtherNC")
+Arch1_18@meta.data$seurat_clusters <- plyr::mapvalues(Arch1_18@meta.data$seurat_clusters, from = old.idents, to = new.idents)
+cols <- c("cadetblue3", "darkseagreen3", "cadetblue4", "mediumseagreen", "gray90")
+cols2 <- c("darkseagreen3","mediumseagreen","cadetblue3", "cadetblue4",  "gray90")
+col_hexes <- c("#8FBC8F", "#3CB371", "#7AC5CD", "#53868b", "#e5e5e5")
+DimPlot(Arch1_18, pt.size = 2, label = T, group.by = "seurat_clusters") +NoLegend() + scale_color_manual(values = cols)
+
+###find markers for 18hpf clusters###
+Arch1_18@meta.data$seurat_clusters <- factor(Arch1_18@meta.data$seurat_clusters, levels = c(1,2,3,4,5))
+Idents(Arch1_18) <- "seurat_clusters"
+markers.18hpf <- FindAllMarkers(Arch1_18, only.pos = T, min.pct = 0.5)
+top10 <- markers.18hpf %>% group_by(cluster) %>% top_n(wt = avg_logFC, n = 10)
+DoHeatmap(Arch1_18, features = top10$gene, label = T, raster = F) + scale_fill_gradientn(colours = rev(brewer.pal(11,"RdBu")))
+#colorRampPalette(brewer.pal(11,"RdBu"))(256)
+###score boxplots using my cc-reg seurat clusters###
+ggplot(Arch1_18@meta.data, aes(x = Arch1_18@active.ident, y = New.Skeletal.Score1, fill = Arch1_18@active.ident)) + geom_boxplot() + theme_bw() + scale_fill_manual(values = cols2)
+ggplot(Arch1_18@meta.data, aes(x = Arch1_18@active.ident, y = New.Early.NC.Score1, fill = Arch1_18@active.ident)) + geom_boxplot() + theme_bw() + scale_fill_manual(values = cols2)
+ggplot(Arch1_18@meta.data, aes(x = Arch1_18@active.ident, y = New.Pigment.Score1, fill = Arch1_18@active.ident)) + geom_boxplot() + theme_bw() + scale_fill_manual(values = cols2)
+ggplot(Arch1_18@meta.data, aes(x = Arch1_18@active.ident, y = New.Neural.Glial.Score1, fill = Arch1_18@active.ident)) + geom_boxplot() + theme_bw() + scale_fill_manual(values = cols2)
+ggplot(Arch1_18@meta.data, aes(x = Arch1_18@active.ident, y = S.Score, fill = Arch1_18@active.ident)) + geom_boxplot() + scale_fill_manual(values = cols2) + theme_bw()
+ggplot(Arch1_18@meta.data, aes(x = Arch1_18@active.ident, y = G2M.Score, fill = Arch1_18@active.ident)) + geom_boxplot() + scale_fill_manual(values = cols2) + theme_bw()
+
+
+density_Scores <- read.table("18hpf_analysis/density.txt", sep = ",", header = T)
+Arch1_18[["density"]] <- density_Scores$density
+
+FeaturePlot(Arch1_18, "density", cols = viridis(50), pt.size = 2) + NoLegend()
+
+#Figure 3a
+cell_types_totals <- as.data.frame(table(Arch1_new_agg_filtered_noNT@meta.data$guided_cell_type, Arch1_new_agg_filtered_noNT@meta.data$orig.ident))
+cell_types_precentages <- cell_types_totals %>% dplyr::group_by(Timepoint) %>% dplyr::mutate(Percentage = Count/sum(Count)*100)
+ggplot(data = cell_types_precentages, aes(x = Timepoint, y = Percentage, fill = Cell.Type)) + geom_bar(stat = "identity") + theme_bw()
+
+
+Arch1_18new <- readRDS("seurat_objects/18hpf_new_unfiltered.RDS")
+Arch1_18new_filtered <- readRDS("seurat_objects/18hpf_new_filtered.RDS")
+
+DimPlot(Arch1_18new_filtered)
+Arch1_18new.markers <- FindAllMarkers(object = Arch1_18new_filtered, only.pos = TRUE, min.pct = 0.2, logfc.threshold = 0.5)
+
+###make a heatmap of the top 5 markers in each cluster
+Arch1_18new.markers %>% group_by(cluster) %>% top_n(n = 8, wt = avg_logFC) -> top8
+DoHeatmap(object = Arch1_18new_filtered, features = c(top8$gene, "foxd1", "foxd2", "foxd3", "sox10","dlx4b","dlx5a","cxcl12b","twist1a")) + NoLegend()
+```

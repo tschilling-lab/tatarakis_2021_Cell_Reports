@@ -1,0 +1,1177 @@
+---
+title: "SOPTSC_signaling"
+author: "David Tatarakis"
+date: "10/25/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+###read in seurat object and make individual files needed for SoptSC###
+```{r}
+seurat_object <- readRDS("seurat_objects/Arch1_aggregate_unfiltered.RDS")
+
+###build the required matrices from the Seurat object###
+counts_matrix <- as.matrix(GetAssayData(seurat_object, slot = "counts"))
+gene_list <- as.matrix(rownames(counts_matrix))
+cell_list <- as.matrix(colnames(counts_matrix))
+annotation_list <- as.matrix(seurat_object@meta.data$orig.ident)
+
+###write off each file as a .csv file###
+write.csv(counts_matrix, file = "/counts_matrix.csv")
+write.csv(gene_list, file = "/gene_list.csv")
+write.csv(cell_list, file = "/cell_list.csv")
+write.csv(annotation_list, file = "/annotation_list.csv")
+
+
+###specify paths to each file###
+df <- "/counts_matrix.csv"
+gf <- "/gene_list.csv"
+cf <- "/cell_list.csv"
+af <- "/annotation_list.csv"
+
+###make the S4 object###
+soptsc_from_seurat <- LoadData(df, gf, cf, af)
+```
+
+
+###skip the filtering steps since they were done in seurat###
+```{r}
+data <- soptsc_from_seurat$data
+logdata <- log10(data + 1)
+gene_names <- soptsc_from_seurat$gene_names
+gene_expression_threshold <- 0.00
+n_features <- max(seurat_object@meta.data$nFeature_RNA)
+filtered_data <- SelectData(logdata, gene_expression_threshold, n_features)
+```
+
+
+## Compute the Similarity Matrix and run dimensionality reduction###
+
+```{r}
+S <- SimilarityM(lambda = 0.05, 
+                 data = filtered_data$M_variable,
+                 dims = 3,
+                 pre_embed_method = 'tsne',
+                 perplexity = 20, 
+                 pca_center = TRUE, 
+                 pca_scale = TRUE)
+
+low_dim_mapping <- RepresentationMap(similarity_matrix = S$W,
+                                      flat_embedding_method = 'tsne',
+                                      join_components = TRUE,
+                                      perplexity = 35,
+                                      theta = 0.5,
+                                      normalize = FALSE,
+                                      pca = TRUE,
+                                      pca_center = TRUE,
+                                      pca_scale = TRUE,
+                                      dims = 2,
+                                      initial_dims = 2)
+```
+
+## Cluster the Cells
+```{r}
+###make sure package "NMF" is loaded before running otherwise will throw error###
+clusters <- ClusterCells(similarityMatrix = S$W, n_comp = 15, .options='p')
+H <- clusters$H
+labels <- clusters$labels
+n_clusters <- length(unique(clusters$labels))
+plot(c(1:20), 
+     clusters$ensemble$eigs$val[1:20],
+     xlab = NA,
+     ylab = 'eigenvalues',
+     main = 'Eigenvalues of the Graph Laplacian')
+```
+
+### Visualize the Clusters
+```{r}
+# define a scheme for the coloring.  This is a required parameter for plotting discrete (factor) data
+colorscale <- ColorHue(n = length(unique(labels)))
+colorscale <- colorscale$hex.1.n.
+# plot clusters
+FeatureScatterPlot(flat_embedding = low_dim_mapping$flat_embedding,
+                         feature = as.factor(labels),
+                         title = "NMF Cluster Labeling",
+                         subtitle = "t-SNE Embedding",
+                         featurename = "Cluster ID",
+                         colorscale = colorscale)
+
+```
+
+###Plot the cells using the cell labels imported from Seurat###
+```{r}
+true_labels <- soptsc_from_seurat$annotation
+cell_types <- seurat_object@meta.data$Cell.Type
+
+###
+cell_type_labels <- as.numeric(seurat_object@meta.data$Cell.Type)
+names(cell_type_labels) <- rownames(seurat_object@meta.data)  
+  
+# plot clusters
+###Here you can assign different labels to the cells. make the list of labels a new set of values for example, the clusters from a Seurat object###
+FeatureScatterPlot(flat_embedding = low_dim_mapping$flat_embedding,
+                         feature = as.factor(true_labels),
+                         title = "True Labeling",
+                         subtitle = "t-SNE Embedding",
+                         featurename = "Annotated Cell Types")
+
+FeatureScatterPlot(flat_embedding = low_dim_mapping$flat_embedding,
+                         feature = as.factor(cell_types),
+                         title = "Cell Types",
+                         subtitle = "t-SNE Embedding",
+                         featurename = "Annotated Cell Types")
+
+```
+
+
+###build lists of ligand-receptor pairs and receptor-target pairs for signaling analysis##
+```{r}
+###read in a list of all known ligand-receptor pairs in human###
+ligand_receptor_pairs <- read.csv("/ligand_receptor_pairs.csv")
+
+###############for wnt pathway#####################
+wnt_pairs <- ligand_receptor_pairs %>%
+                  group_by(Ligand.ApprovedSymbol) %>%
+                  filter(grepl(pattern = "WNT", Ligand.ApprovedSymbol))
+
+###load two marts, one for human and one for zebrafish
+require("biomaRt")
+human = useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+zebrafish = useMart("ensembl", dataset = "drerio_gene_ensembl")
+
+###get a list of all GO terms in human and their GO term IDs.
+Go.Term.Data <- getBM(attributes = c("go_id", "name_1006"), mart = human)  
+
+###get a list of human genes from the human mart that match a GO term ID of choice.  
+wnt.data <- getBM(attributes=c('hgnc_symbol', "go_id", "name_1006"),
+                   filters = 'go', values = 'GO:0016055', mart = human)
+
+gene.list <- unique(wnt.data$hgnc_symbol)  
+head(gene.list, n = 10)
+wnt_targets <- as.data.frame(gene.list)
+wnt_targets <- wnt_targets %>%
+                    group_by(gene.list) %>%
+                    filter(gene.list %notin% wnt_pairs$Receptor.ApprovedSymbol)
+wnt_targets <- wnt_targets %>%
+                    group_by(gene.list) %>%
+                    filter(gene.list %notin% wnt_pairs$Ligand.ApprovedSymbol)
+
+#Convert human wnt signaling pairs and targets to zebrafish equivalents#
+
+ligandsV2 = getLDS(attributes = c("hgnc_symbol"),
+                   filters = "hgnc_symbol",
+                   values = unique(as.character(wnt_pairs$Ligand.ApprovedSymbol)),
+                   mart = human,
+                   attributesL = c("zfin_id_symbol"),
+                   martL = zebrafish, uniqueRows=T)
+  
+  zebrafish.lig <- unique(ligandsV2)
+  colnames(zebrafish.lig) <- c("Ligand","ZFIN_Ligand")
+  
+receptorsV2 = getLDS(attributes = c("hgnc_symbol"),
+                   filters = "hgnc_symbol",
+                   values = unique(as.character(wnt_pairs$Receptor.ApprovedSymbol)),
+                   mart = human,
+                   attributesL = c("zfin_id_symbol"),
+                   martL = zebrafish, uniqueRows=T)
+  zebrafish.rec <- unique(receptorsV2)
+  colnames(zebrafish.rec) <- c("Receptor","ZFIN_Receptor")
+
+targetsV2 = getLDS(attributes = c("hgnc_symbol"),
+                   filters = "hgnc_symbol",
+                   values = unique(as.character(wnt_targets$gene.list)),
+                   mart = human,
+                   attributesL = c("zfin_id_symbol"),
+                   martL = zebrafish, uniqueRows=T)
+  
+  zebrafish.targets <- unique(targetsV2)
+  colnames(zebrafish.targets) <- c("Target","ZFIN_Target")
+  wnt_ZFIN_targets <- zebrafish.targets
+  
+test <- wnt_pairs
+
+test$zfin_ligand <- ""
+test$zfin_receptor <- ""
+
+###make sure to narrow it down to a single homolog for each receptor and ligand###
+
+rownames(zebrafish.lig) <- zebrafish.lig$Ligand
+rownames(zebrafish.rec) <- zebrafish.rec$Receptor
+
+for (i in 1:length(test$Ligand.ApprovedSymbol))
+ {
+     gene <- as.character(test$Ligand.ApprovedSymbol[i])
+     test$zfin_ligand[i] <- zebrafish.lig[gene, 2]
+ }
+
+for (i in 1:length(test$Receptor.ApprovedSymbol))
+ {
+     gene <- as.character(test$Receptor.ApprovedSymbol[i])
+     test$zfin_receptor[i] <- zebrafish.rec[gene, 2]
+ }
+
+test <- drop_na(test)
+
+as.data.frame(zebrafish.wnt.pairs) <- test[,c(3,4)]
+colnames(zebrafish.wnt.pairs) <- c("Ligand", "Receptor")
+
+
+
+test <- zebrafish.wnt.pairs %>% 
+            slice(rep(1:n(), each = length(zebrafish.targets$Target))) %>%
+            mutate(Target = zebrafish.targets$Target)
+
+zebrafish.wnt.pairs <- test
+
+zebrafish.wnt.receptor.target.list <- data.frame(Receptor=rep(as.character(receptor_list$Receptor, each = length(zebrafish.targets))),
+                                   Target=rep(as.character(zebrafish.targets$ZFIN_Target),each=length(receptor_list$Receptor)))
+
+
+###tables must be tab seperated, and seem like the cannot have quotes around the entries###
+write.table(data.frame(zebrafish.wnt.pairs), file = "/wnt.ligand.receptor.pairs.tsv",  row.names = F, quote=F, sep="\t")
+write.table(data.frame(zebrafish.wnt.receptor.target.list %>% mutate(Direction = "up")), file = "/wnt.receptor.targets.tsv",  row.names = F, quote=F,sep="\t")
+
+```
+
+
+## Analyze Signaling Mediated by a Ligand-Receptor Family
+In order to analyze signaling, we can load in tables which describe a pathay in detail.  There are two tables needed, one that specifies all unique ligand receptor combinations and another that specifies receptor/target/up|down combinations.  Example tables for the TgfB pathway are provided in extdata/ and loaded here for the current skin data set.  Using the ImportPathway function, an inner join over the two tables tabulates all ligand/receptor/target/direction 4-tuples.  We then compute the probability of intercellular interaction based on this pathway.
+
+```{r}
+library(knitr)
+library(kableExtra)
+lig_rec_path <- "/wnt.ligand.receptor.pairs.tsv"
+rec_target_path <- "/wnt.receptor.targets.tsv"
+pathway <- ImportPathway(lig_table_path = lig_rec_path,
+                         rec_table_path = rec_target_path,
+                         data = logdata,
+                         gene_names = gene_names)
+k = pathway$pathway %>% kable()
+```
+
+```{r, results='hide', message=FALSE}
+  
+  Pmats <- GetSignalingPartners(logdata,
+                                gene_names,
+                                pathway$pathway_removed)
+
+  Pmats_2 <- GetSignalingPartners2(logdata,
+                                gene_names,
+                                pathway$pathway_removed)
+```
+```{r}
+kable_styling(kable_input = k) %>% scroll_box(height = "500px", width = "300px")
+```
+
+### Circos Plot of Intercellular Network
+Now plot the previous result as a circos plot on the top five ligand-producing and top five receptor-bearing cells from every cluster.  The upper hemisphere of the plot shows receptor-bearing cells.  The chords of the plot are colored by the ligand-producing cells in the lower hemisphere.
+
+```{r}
+SigPlot(P = Pmats_2$P_agg,
+        cluster_labels = cell_type_labels,
+        lig_cells_per_cluster = 1,
+        rec_cells_per_cluster = 5,
+        rgb_gap = 0.01,
+        title_text = "Signaling Between Cells")
+```
+
+### Circos Plot of Intercluster Network
+Directional plot of cluster-to-cluster signaling.  The root of the directional chord is raised.
+
+```{r}
+  n_clusters <- length(unique(cell_type_labels))
+  cluster_P <- ClusterSig(Pmats_2$P_agg,
+                          cluster_labels = cell_type_labels)
+  SigPlot(P = cluster_P,
+          cluster_labels = c(1:n_clusters),
+          rgb_gap = 0,
+          title_text = "Wnt Signaling Between Clusters")
+```
+
+
+####soptsc analysis of all timepoints####
+```{r}
+library(RSoptSC)
+seurat_object <- readRDS("seurat_objects/Arch1_aggregate_unfiltered.RDS")
+Idents(seurat_object) <- "orig.ident"
+
+hpf12 <- subset(seurat_object, idents = "12hpf")
+hpf14 <- subset(seurat_object, idents = "14hpf")
+hpf18 <- subset(seurat_object, idents = "18hpf")
+hpf20 <- subset(seurat_object, idents = "20hpf")
+hpf24 <- subset(seurat_object, idents = "24hpf")
+hpf30 <- subset(seurat_object, idents = "30hpf")
+###build the required matrices from each Seurat object###
+counts_matrix <- as.matrix(GetAssayData(seurat_object, slot = "counts"))
+gene_list <- as.matrix(rownames(counts_matrix))
+cell_list <- as.matrix(colnames(counts_matrix))
+annotation_list <- as.matrix(seurat_object@meta.data$orig.ident)
+
+#12
+counts_matrix12 <- as.matrix(GetAssayData(hpf12, slot = "counts"))
+gene_list12 <- as.matrix(rownames(counts_matrix12))
+cell_list12 <- as.matrix(colnames(counts_matrix12))
+annotation_list12 <- as.matrix(hpf12@meta.data$orig.ident)
+
+#14
+counts_matrix14 <- as.matrix(GetAssayData(hpf14, slot = "counts"))
+gene_list14 <- as.matrix(rownames(counts_matrix14))
+cell_list14 <- as.matrix(colnames(counts_matrix14))
+annotation_list14 <- as.matrix(hpf14@meta.data$orig.ident)
+
+#18
+counts_matrix18 <- as.matrix(GetAssayData(hpf18, slot = "counts"))
+gene_list18 <- as.matrix(rownames(counts_matrix18))
+cell_list18 <- as.matrix(colnames(counts_matrix18))
+annotation_list18 <- as.matrix(hpf18@meta.data$orig.ident)
+
+#20
+counts_matrix20 <- as.matrix(GetAssayData(hpf20, slot = "counts"))
+gene_list20 <- as.matrix(rownames(counts_matrix20))
+cell_list20 <- as.matrix(colnames(counts_matrix20))
+annotation_list20 <- as.matrix(hpf20@meta.data$orig.ident)
+
+#24
+counts_matrix24 <- as.matrix(GetAssayData(hpf24, slot = "counts"))
+gene_list24 <- as.matrix(rownames(counts_matrix24))
+cell_list24 <- as.matrix(colnames(counts_matrix24))
+annotation_list24 <- as.matrix(hpf24@meta.data$orig.ident)
+
+#30
+counts_matrix30 <- as.matrix(GetAssayData(hpf30, slot = "counts"))
+gene_list30 <- as.matrix(rownames(counts_matrix30))
+cell_list30 <- as.matrix(colnames(counts_matrix30))
+annotation_list30 <- as.matrix(hpf30@meta.data$orig.ident)
+
+###write off each file as a .csv file###
+write.csv(counts_matrix, file = "/counts_matrix.csv")
+write.csv(gene_list, file = "/gene_list.csv")
+write.csv(cell_list, file = "/cell_list.csv")
+write.csv(annotation_list, file = "/annotation_list.csv")
+
+#12
+write.csv(counts_matrix12, file = "/12hpf//counts_matrix.csv")
+write.csv(gene_list12, file = "/12hpf//gene_list.csv")
+write.csv(cell_list12, file = "/12hpf//cell_list.csv")
+write.csv(annotation_list12, file = "/12hpf//annotation_list.csv")
+
+#14
+write.csv(counts_matrix14, file = "/14hpf//counts_matrix.csv")
+write.csv(gene_list14, file = "/14hpf//gene_list.csv")
+write.csv(cell_list14, file = "/14hpf//cell_list.csv")
+write.csv(annotation_list14, file = "/14hpf//annotation_list.csv")
+
+#18
+write.csv(counts_matrix18, file = "/18hpf//counts_matrix.csv")
+write.csv(gene_list18, file = "/18hpf//gene_list.csv")
+write.csv(cell_list18, file = "/18hpf//cell_list.csv")
+write.csv(annotation_list18, file = "/18hpf//annotation_list.csv")
+
+#20
+write.csv(counts_matrix20, file = "/20hpf//counts_matrix.csv")
+write.csv(gene_list20, file = "/20hpf//gene_list.csv")
+write.csv(cell_list20, file = "/20hpf//cell_list.csv")
+write.csv(annotation_list20, file = "/20hpf//annotation_list.csv")
+
+#24
+write.csv(counts_matrix24, file = "/24hpf//counts_matrix.csv")
+write.csv(gene_list24, file = "/24hpf//gene_list.csv")
+write.csv(cell_list24, file = "/24hpf//cell_list.csv")
+write.csv(annotation_list24, file = "/24hpf//annotation_list.csv")
+
+#30
+write.csv(counts_matrix30, file = "/30hpf//counts_matrix.csv")
+write.csv(gene_list30, file = "/30hpf//gene_list.csv")
+write.csv(cell_list30, file = "/30hpf//cell_list.csv")
+write.csv(annotation_list30, file = "/30hpf//annotation_list.csv")
+
+
+###whole object###
+###specify paths to each file###
+df <- "/counts_matrix.csv"
+gf <- "/gene_list.csv"
+cf <- "/cell_list.csv"
+af <- "/annotation_list.csv"
+
+###make the S4 object###
+soptsc_from_seurat <- LoadData(df, gf, cf, af)
+
+data <- soptsc_from_seurat$data
+logdata <- log10(data + 1)
+gene_names <- soptsc_from_seurat$gene_names
+
+
+lig_rec_path <- "/wnt.ligand.receptor.pairs.tsv"
+rec_target_path <- "/zebrafish.wnt.target.bulk_directionality.tsv"
+pathway <- ImportPathway(lig_table_path = lig_rec_path,
+                         rec_table_path = rec_target_path,
+                         data = logdata,
+                         gene_names = gene_names)
+
+
+Pmats <- GetSignalingPartners(logdata,
+                                gene_names,
+                                pathway$pathway_removed)
+
+  Pmats_2 <- GetSignalingPartners2(logdata,
+                                gene_names,
+                                pathway$pathway_removed)
+  
+  
+  SigPlot(P = Pmats_2$P_agg,
+        cluster_labels = cell_type_labels,
+        lig_cells_per_cluster = 1,
+        rec_cells_per_cluster = 5,
+        rgb_gap = 0.01,
+        title_text = "Signaling Between Cells")
+  
+  n_clusters <- length(unique(cell_type_labels))
+  cluster_P <- ClusterSig(Pmats_2$P_agg,
+                          cluster_labels = cell_type_labels)
+  SigPlot(P = cluster_P,
+          cluster_labels = c(1:n_clusters),
+          rgb_gap = 0,
+          title_text = "Wnt Signaling Between Clusters")
+  
+  
+  
+  ###12 hpf object###
+###specify paths to each file###
+df <- "/12hpf/counts_matrix.csv"
+gf <- "/12hpf/gene_list.csv"
+cf <- "/12hpf/cell_list.csv"
+af <- "/12hpf/annotation_list.csv"
+
+###make the S4 object###
+soptsc_from_seurat <- LoadData(df, gf, cf, af)
+
+data <- soptsc_from_seurat$data
+logdata <- log10(data + 1)
+gene_names <- soptsc_from_seurat$gene_names
+cell_type_labels <- as.numeric(hpf12$Cell.Type)
+
+lig_rec_path <- "/wnt8.ligand.receptor.pairs.tsv"
+rec_target_path <- "/zebrafish.wnt.target.bulk_directionality.tsv"
+pathway <- ImportPathway(lig_table_path = lig_rec_path,
+                         rec_table_path = rec_target_path,
+                         data = logdata,
+                         gene_names = gene_names)
+
+
+  Pmats_2 <- GetSignalingPartners2(logdata,
+                                gene_names,
+                                pathway$pathway_removed)
+  
+  
+  SigPlot(P = Pmats_2$P_agg,
+        cluster_labels = cell_type_labels,
+        lig_cells_per_cluster = 1,
+        rec_cells_per_cluster = 5,
+        rgb_gap = 0.01,
+        title_text = "Signaling Between Cells")
+  
+  n_clusters <- length(unique(cell_type_labels))
+  cluster_P <- ClusterSig(Pmats_2$P_agg,
+                          cluster_labels = cell_type_labels)
+  
+  cell_type_character_labels <- as.character(seurat_object@meta.data$Cell.Type)
+  names(cell_type_character_labels) <- rownames(seurat_object@meta.data)
+  
+  SigPlot(P = cluster_P,
+          cluster_labels = as.numeric(unique(rownames(cluster_P))),
+          rgb_gap = 0,
+          title_text = "12 hpf Wnt Signaling Between Clusters")
+  
+  
+###14hpf object###
+###specify paths to each file###
+df <- "/14hpf/counts_matrix.csv"
+gf <- "/14hpf/gene_list.csv"
+cf <- "/14hpf/cell_list.csv"
+af <- "/14hpf/annotation_list.csv"
+
+###make the S4 object###
+soptsc_from_seurat <- LoadData(df, gf, cf, af)
+
+cell_type_labels <- as.numeric(hpf14$Cell.Type)
+data <- soptsc_from_seurat$data
+logdata <- log10(data + 1)
+gene_names <- soptsc_from_seurat$gene_names
+
+
+lig_rec_path <- "/wnt8.ligand.receptor.pairs.tsv"
+rec_target_path <- "/zebrafish.wnt.target.bulk_directionality.tsv"
+pathway <- ImportPathway(lig_table_path = lig_rec_path,
+                         rec_table_path = rec_target_path,
+                         data = logdata,
+                         gene_names = gene_names)
+
+
+
+  Pmats_2 <- GetSignalingPartners2(logdata,
+                                gene_names,
+                                pathway$pathway_removed)
+  
+  
+  SigPlot(P = Pmats_2$P_agg,
+        cluster_labels = cell_type_labels,
+        lig_cells_per_cluster = 1,
+        rec_cells_per_cluster = 5,
+        rgb_gap = 0.01,
+        title_text = "Signaling Between Cells")
+  
+  n_clusters <- length(unique(cell_type_labels))
+  cluster_P <- ClusterSig(Pmats_2$P_agg,
+                          cluster_labels = cell_type_labels)
+  SigPlot(P = cluster_P,
+          cluster_labels = c(as.numeric(unique(rownames(cluster_P)))),
+          rgb_gap = 0,
+          title_text = "14 hpf Wnt Signaling Between Clusters")
+  
+
+  ###18hpf object###
+###specify paths to each file###
+df <- "/18hpf/counts_matrix.csv"
+gf <- "/18hpf/gene_list.csv"
+cf <- "/18hpf/cell_list.csv"
+af <- "/18hpf/annotation_list.csv"
+
+###make the S4 object###
+soptsc_from_seurat <- LoadData(df, gf, cf, af)
+
+cell_type_labels <- as.numeric(hpf18$Cell.Type)
+data <- soptsc_from_seurat$data
+logdata <- log10(data + 1)
+gene_names <- soptsc_from_seurat$gene_names
+
+
+lig_rec_path <- "/wnt8.ligand.receptor.pairs.tsv"
+rec_target_path <- "/zebrafish.wnt.target.bulk_directionality.tsv"
+pathway <- ImportPathway(lig_table_path = lig_rec_path,
+                         rec_table_path = rec_target_path,
+                         data = logdata,
+                         gene_names = gene_names)
+
+
+
+  Pmats_2 <- GetSignalingPartners2(logdata,
+                                gene_names,
+                                pathway$pathway_removed)
+  
+  
+  SigPlot(P = Pmats_2$P_agg,
+        cluster_labels = cell_type_labels,
+        lig_cells_per_cluster = 1,
+        rec_cells_per_cluster = 5,
+        rgb_gap = 0.01,
+        title_text = "Signaling Between Cells")
+  
+  n_clusters <- length(unique(cell_type_labels))
+  cluster_P <- ClusterSig(Pmats_2$P_agg,
+                          cluster_labels = cell_type_labels)
+  SigPlot(P = cluster_P,
+          cluster_labels = c(as.numeric(unique(rownames(cluster_P)))),
+          rgb_gap = 0,
+          title_text = "18 hpf Wnt Signaling Between Clusters")
+  
+  
+  
+###20hpf object###
+###specify paths to each file###
+df <- "/20hpf/counts_matrix.csv"
+gf <- "/20hpf/gene_list.csv"
+cf <- "/20hpf/cell_list.csv"
+af <- "/20hpf/annotation_list.csv"
+
+###make the S4 object###
+soptsc_from_seurat <- LoadData(df, gf, cf, af)
+
+cell_type_labels <- as.numeric(hpf20$Cell.Type)
+data <- soptsc_from_seurat$data
+logdata <- log10(data + 1)
+gene_names <- soptsc_from_seurat$gene_names
+
+
+lig_rec_path <- "/wnt8.ligand.receptor.pairs.tsv"
+rec_target_path <- "/zebrafish.wnt.target.bulk_directionality.tsv"
+pathway <- ImportPathway(lig_table_path = lig_rec_path,
+                         rec_table_path = rec_target_path,
+                         data = logdata,
+                         gene_names = gene_names)
+
+
+  Pmats_2 <- GetSignalingPartners2(logdata,
+                                gene_names,
+                                pathway$pathway_removed)
+  
+  
+  SigPlot(P = Pmats_2$P_agg,
+        cluster_labels = cell_type_labels,
+        lig_cells_per_cluster = 1,
+        rec_cells_per_cluster = 5,
+        rgb_gap = 0.01,
+        title_text = "Signaling Between Cells")
+  
+  n_clusters <- length(unique(cell_type_labels))
+  cluster_P <- ClusterSig(Pmats_2$P_agg,
+                          cluster_labels = cell_type_labels)
+  SigPlot(P = cluster_P,
+          cluster_labels = c(as.numeric(unique(rownames(cluster_P)))),
+          rgb_gap = 0,
+          title_text = "20 hpf Wnt Signaling Between Clusters")
+  
+  
+
+  ###24hpf object###
+###specify paths to each file###
+df <- "/24hpf/counts_matrix.csv"
+gf <- "/24hpf/gene_list.csv"
+cf <- "/24hpf/cell_list.csv"
+af <- "/24hpf/annotation_list.csv"
+
+###make the S4 object###
+soptsc_from_seurat <- LoadData(df, gf, cf, af)
+
+cell_type_labels <- as.numeric(hpf24$Cell.Type)
+data <- soptsc_from_seurat$data
+logdata <- log10(data + 1)
+gene_names <- soptsc_from_seurat$gene_names
+
+
+lig_rec_path <- "/wnt8.ligand.receptor.pairs.tsv"
+rec_target_path <- "/zebrafish.wnt.target.bulk_directionality.tsv"
+pathway <- ImportPathway(lig_table_path = lig_rec_path,
+                         rec_table_path = rec_target_path,
+                         data = logdata,
+                         gene_names = gene_names)
+
+
+
+  Pmats_2 <- GetSignalingPartners2(logdata,
+                                gene_names,
+                                pathway$pathway_removed)
+  
+  
+  SigPlot(P = Pmats_2$P_agg,
+        cluster_labels = cell_type_labels,
+        lig_cells_per_cluster = 1,
+        rec_cells_per_cluster = 5,
+        rgb_gap = 0.01,
+        title_text = "Signaling Between Cells")
+  
+  n_clusters <- length(unique(cell_type_labels))
+  cluster_P <- ClusterSig(Pmats_2$P_agg,
+                          cluster_labels = cell_type_labels)
+  SigPlot(P = cluster_P,
+          cluster_labels = c(as.numeric(unique(rownames(cluster_P)))),
+          rgb_gap = 0,
+          title_text = "24 hpf Wnt Signaling Between Clusters")
+  
+  
+  
+  
+###30hpf object###
+###specify paths to each file###
+df <- "/30hpf/counts_matrix.csv"
+gf <- "/30hpf/gene_list.csv"
+cf <- "/30hpf/cell_list.csv"
+af <- "/30hpf/annotation_list.csv"
+
+###make the S4 object###
+soptsc_from_seurat <- LoadData(df, gf, cf, af)
+
+cell_type_labels <- as.numeric(hpf30$Cell.Type)
+data <- soptsc_from_seurat$data
+logdata <- log10(data + 1)
+gene_names <- soptsc_from_seurat$gene_names
+
+
+lig_rec_path <- "/wnt8.ligand.receptor.pairs.tsv"
+rec_target_path <- "/zebrafish.wnt.target.bulk_directionality.tsv"
+pathway <- ImportPathway(lig_table_path = lig_rec_path,
+                         rec_table_path = rec_target_path,
+                         data = logdata,
+                         gene_names = gene_names)
+
+
+  Pmats_2 <- GetSignalingPartners2(logdata,
+                                gene_names,
+                                pathway$pathway_removed)
+  
+  
+  SigPlot(P = Pmats_2$P_agg,
+        cluster_labels = cell_type_labels,
+        lig_cells_per_cluster = 1,
+        rec_cells_per_cluster = 5,
+        rgb_gap = 0.01,
+        title_text = "Signaling Between Cells")
+  
+  n_clusters <- length(unique(cell_type_labels))
+  cluster_P <- ClusterSig(Pmats_2$P_agg,
+                          cluster_labels = cell_type_labels)
+  SigPlot(P = cluster_P,
+          cluster_labels = c(as.numeric(unique(rownames(cluster_P)))),
+          rgb_gap = 0,
+          title_text = "30 hpf Wnt Signaling Between Clusters")
+  
+  
+  
+###plot expression of ligands and receptors in single-cell object###
+receptors <- as.character(unique(zebrafish.wnt.pairs$Receptor))
+ligands <- as.character(unique(zebrafish.wnt.pairs$Ligand))
+
+ligand_plots <- c()
+receptor_plots <- c()
+
+for (i in 1:length(ligands))
+{
+  if (ligands[i] %in% rownames(seurat_object@assays$RNA@data)){
+    
+    ligand_plots[[i]] <- FeaturePlot(seurat_object, features = ligands[i])
+  }
+  else {
+    
+  }
+}
+
+
+for (i in 1:length(receptors))
+{
+  if (receptors[i] %in% rownames(seurat_object@assays$RNA@data)){
+    
+    receptor_plots[[i]] <- FeaturePlot(seurat_object, features = receptors[i])
+  }
+  else {
+    
+  }
+}
+
+```
+
+
+###18 hpf Wnt signaling analysis###
+```{r}
+seurat_object18 <- readRDS("seurat_objects/18hpf_new_unfiltered.RDS")
+ ###build the required matrices from each Seurat object###
+counts_matrix <- as.matrix(GetAssayData(seurat_object18, slot = "counts"))
+gene_list <- as.matrix(rownames(counts_matrix))
+cell_list <- as.matrix(colnames(counts_matrix))
+annotation_list <- as.matrix(seurat_object18@meta.data$Cell.Type)
+
+
+###write off each file as a .csv file###
+write.csv(counts_matrix, file = "/counts_matrix18new.csv")
+write.csv(gene_list, file = "/gene_list18new.csv")
+write.csv(cell_list, file = "/cell_list18new.csv")
+write.csv(annotation_list, file = "/annotation_list18new.csv")
+
+
+###specify paths to each file###
+df <- "/counts_matrix18new.csv"
+gf <- "/gene_list18new.csv"
+cf <- "/cell_list18new.csv"
+af <- "/annotation_list18new.csv"
+
+###make the S4 object###
+soptsc_from_seurat <- LoadData(df, gf, cf, af)
+
+data <- soptsc_from_seurat$data
+logdata <- log10(data + 1)
+gene_names <- soptsc_from_seurat$gene_names
+cell_type_labels <- as.numeric(seurat_object18$Cell.Type)
+
+lig_rec_path <- "/wnt.ligand.receptor.pairs_with5b.tsv"
+rec_target_path <- "/zebrafish.wnt.target.bulk_directionality.tsv"
+pathway <- ImportPathway(lig_table_path = lig_rec_path,
+                         rec_table_path = rec_target_path,
+                         data = logdata,
+                         gene_names = gene_names)
+
+
+
+  Pmats_2 <- GetSignalingPartners2(logdata,
+                                gene_names,
+                                pathway$pathway_removed,
+                                manual_colors = c("#9BCD9B", "#3CB371", "#7AC5CD", "#53868B", "#E5E5E5", "#CD9B1D", "#EE7942", "#8968CD", "#CD9B9B", "#CD6889"))
+  
+  
+  
+  SigPlot2(P = Pmats_2$P_agg,
+        cluster_labels = cell_type_labels,
+        lig_cells_per_cluster = 10,
+        rec_cells_per_cluster = 10,
+        rgb_gap = 0.01,
+        title_text = "Signaling Between Cells",
+        manual_colors = c("#9BCD9B", "#3CB371", "#7AC5CD", "#53868B", "#E5E5E5", "#CD9B1D", "#EE7942", "#8968CD", "#CD9B9B", "#CD6889"))
+  
+  n_clusters <- length(unique(cell_type_labels))
+  cluster_P <- ClusterSig(Pmats_2$P_agg,
+                          cluster_labels = cell_type_labels)
+  SigPlot2(P = cluster_P,
+          cluster_labels = c(1:n_clusters),
+          rgb_gap = 0,
+          title_text = "Wnt Signaling Between Clusters",
+          manual_colors = c("#9BCD9B", "#3CB371", "#7AC5CD", "#53868B", "#E5E5E5", "#CD9B1D", "#EE7942", "#8968CD", "#CD9B9B", "#CD6889"))
+  
+averages_18 <- AverageExpression(Arch1_18_unfiltered)
+wnt.receptors <- c("fzd8a", "mcama", "fzd2", "ror1", "fzd3b", "atp6ap2", "fzd7a", "fzd10", "ryk", "ror2", "fzd6", "lrp5", "lrp1aa")
+wnt.ligands <- c("wnt4", "wnt7bb", "wnt11r", "wnt11", "wnt7aa", "wnt6b", "wnt5b", "wnt16")
+
+pheatmap(averages_18$RNA[wnt.receptors,1:5], scale = "row", cluster_cols = F, clustering_method = "ward.D2", treeheight_row = 0, treeheight_col = 0, color = rev(colorRampPalette(brewer.pal(11,"RdBu"))(256)))
+
+pheatmap(averages_18$RNA[wnt.ligands,], scale = "row", cluster_cols = F, clustering_method = "ward.D2", treeheight_row = 0, treeheight_col = 0, color = rev(colorRampPalette(brewer.pal(11,"RdBu"))(256)))
+
+
+###categorization of Wnt ligands based on expression###
+all.wnt.ligand.pairs <- read.table("/wnt.ligand.receptor.pairs_with5b.tsv", header = T)
+group1.ligands <- c("wnt7bb", "wnt4", "wnt11", "wnt7aa")
+
+
+View(all.wnt.ligand.pairs)
+
+expressed.pairs <- all.wnt.ligand.pairs %>% filter(Ligand %in% wnt.ligands & Receptor %in% wnt.receptors)
+wnt11_fzd7a <- expressed.pairs %>% filter(Ligand == "wnt11" & Receptor == "fzd7a")
+wnt16_fzd6 <- expressed.pairs %>% filter(Ligand == "wnt16" & Receptor == "fzd6")
+wnt4_fzd2 <- expressed.pairs %>% filter(Ligand == "wnt4" & Receptor == "fzd2")
+wnt4_fzd6 <- expressed.pairs %>% filter(Ligand == "wnt4" & Receptor == "fzd6")
+wnt7a_fzd10 <- expressed.pairs %>% filter(Ligand == "wnt7aa" & Receptor == "fzd10")
+wnt7b_fzd10 <- expressed.pairs %>% filter(Ligand == "wnt7bb" & Receptor == "fzd10")
+wnt7b_lrp5 <- expressed.pairs %>% filter(Ligand == "wnt7bb" & Receptor == "lrp5")
+wnt7a_lrp5 <- wnt7b_lrp5
+wnt7a_lrp5[1,1] <- "wnt7aa"
+wnt7_atp6ap2 <- wnt7a_lrp5
+wnt7_atp6ap2[1,2] <- "atp6ap2"
+
+write.table(wnt11_fzd7a, sep = "\t", row.names = F, quote = F, file = "/specific_wnt_pairs/wnt11_fzd7a.pair.tsv")
+write.table(wnt16_fzd6, sep = "\t", row.names = F, quote = F, file = "/specific_wnt_pairs/wnt16_fzd6.pair.tsv")
+write.table(wnt4_fzd2, sep = "\t", row.names = F, quote = F, file = "/specific_wnt_pairs/wnt4_fzd2.pair.tsv")
+write.table(wnt4_fzd6, sep = "\t", row.names = F, quote = F, file = "/specific_wnt_pairs/wnt4_fzd6.pair.tsv")
+write.table(wnt7a_fzd10, sep = "\t", row.names = F, quote = F, file = "/specific_wnt_pairs/wnt7a_fzd10.pair.tsv")
+write.table(wnt7b_fzd10, sep = "\t", row.names = F, quote = F, file = "/specific_wnt_pairs/wnt7b_fzd10.pair.tsv")
+write.table(wnt7b_lrp5, sep = "\t", row.names = F, quote = F, file = "/specific_wnt_pairs/wnt7b_lrp5.pair.tsv")
+write.table(wnt7a_lrp5, sep = "\t", row.names = F, quote = F, file = "/specific_wnt_pairs/wnt7a_lrp5.pair.tsv")
+write.table(wnt7_atp6ap2, sep = "\t", row.names = F, quote = F, file = "/specific_wnt_pairs/wnt7a_atp6ap2.pair.tsv")
+```
+
+###wnt11_fzd7a signaling###
+```{r}
+lig_rec_path <- "/specific_wnt_pairs/wnt11_fzd7a.pair.tsv"
+rec_target_path <- "/zebrafish.wnt.target.bulk_directionality.tsv"
+pathway <- ImportPathway(lig_table_path = lig_rec_path,
+                         rec_table_path = rec_target_path,
+                         data = logdata,
+                         gene_names = gene_names)
+
+  Pmats_2 <- GetSignalingPartners2(logdata,
+                                gene_names,
+                                pathway$pathway_removed,
+                                manual_colors = c("#9BCD9B", "#3CB371", "#7AC5CD", "#53868B", "#E5E5E5", "#CD9B1D", "#EE7942", "#8968CD", "#CD9B9B", "#CD6889"))
+  
+  SigPlot2(P = Pmats_2$P_agg,
+        cluster_labels = cell_type_labels,
+        lig_cells_per_cluster = 10,
+        rec_cells_per_cluster = 10,
+        rgb_gap = 0.01,
+        title_text = "wnt11-fzd7a Signaling Between Cells",
+        manual_colors = c("#9BCD9B", "#3CB371", "#7AC5CD", "#53868B", "#E5E5E5", "#CD9B1D", "#EE7942", "#8968CD", "#CD9B9B", "#CD6889"))
+```
+
+###wnt16_fzd6 signaling###
+```{r}
+lig_rec_path <- "/specific_wnt_pairs/wnt16_fzd6.pair.tsv"
+rec_target_path <- "/zebrafish.wnt.target.bulk_directionality.tsv"
+pathway <- ImportPathway(lig_table_path = lig_rec_path,
+                         rec_table_path = rec_target_path,
+                         data = logdata,
+                         gene_names = gene_names)
+
+  Pmats_2 <- GetSignalingPartners2(logdata,
+                                gene_names,
+                                pathway$pathway_removed,
+                                manual_colors = c("#9BCD9B", "#3CB371", "#7AC5CD", "#53868B", "#E5E5E5", "#CD9B1D", "#EE7942", "#8968CD", "#CD9B9B", "#CD6889"))
+  
+  SigPlot2(P = Pmats_2$P_agg,
+        cluster_labels = cell_type_labels,
+        lig_cells_per_cluster = 10,
+        rec_cells_per_cluster = 10,
+        rgb_gap = 0.01,
+        title_text = "wnt16-fzd6 Signaling Between Cells",
+        manual_colors = c("#9BCD9B", "#3CB371", "#7AC5CD", "#53868B", "#E5E5E5", "#CD9B1D", "#EE7942", "#8968CD", "#CD9B9B", "#CD6889"))
+```
+
+###wnt4_fzd2 signaling###
+```{r}
+lig_rec_path <- "/specific_wnt_pairs/wnt4_fzd2.pair.tsv"
+rec_target_path <- "/zebrafish.wnt.target.bulk_directionality.tsv"
+pathway <- ImportPathway(lig_table_path = lig_rec_path,
+                         rec_table_path = rec_target_path,
+                         data = logdata,
+                         gene_names = gene_names)
+
+  Pmats_2 <- GetSignalingPartners2(logdata,
+                                gene_names,
+                                pathway$pathway_removed,
+                                manual_colors = c("#9BCD9B", "#3CB371", "#7AC5CD", "#53868B", "#E5E5E5", "#CD9B1D", "#EE7942", "#8968CD", "#CD9B9B", "#CD6889"))
+  
+  SigPlot2(P = Pmats_2$P_agg,
+        cluster_labels = cell_type_labels,
+        lig_cells_per_cluster = 10,
+        rec_cells_per_cluster = 10,
+        rgb_gap = 0.01,
+        title_text = "wnt4-fzd2 Signaling Between Cells",
+        manual_colors = c("#9BCD9B", "#3CB371", "#7AC5CD", "#53868B", "#E5E5E5", "#CD9B1D", "#EE7942", "#8968CD", "#CD9B9B", "#CD6889"))
+```
+
+###wnt4_fzd6 signaling###
+```{r}
+lig_rec_path <- "/specific_wnt_pairs/wnt4_fzd6.pair.tsv"
+rec_target_path <- "/zebrafish.wnt.target.bulk_directionality.tsv"
+pathway <- ImportPathway(lig_table_path = lig_rec_path,
+                         rec_table_path = rec_target_path,
+                         data = logdata,
+                         gene_names = gene_names)
+
+  Pmats_2 <- GetSignalingPartners2(logdata,
+                                gene_names,
+                                pathway$pathway_removed,
+                                manual_colors = c("#9BCD9B", "#3CB371", "#7AC5CD", "#53868B", "#E5E5E5", "#CD9B1D", "#EE7942", "#8968CD", "#CD9B9B", "#CD6889"))
+  
+  SigPlot2(P = Pmats_2$P_agg,
+        cluster_labels = cell_type_labels,
+        lig_cells_per_cluster = 10,
+        rec_cells_per_cluster = 10,
+        rgb_gap = 0.01,
+        title_text = "wnt4-fzd6 Signaling Between Cells",
+        manual_colors = c("#9BCD9B", "#3CB371", "#7AC5CD", "#53868B", "#E5E5E5", "#CD9B1D", "#EE7942", "#8968CD", "#CD9B9B", "#CD6889"))
+```
+
+
+###wnt7aa_fzd10 signaling###
+```{r}
+lig_rec_path <- "/specific_wnt_pairs/wnt7a_fzd10.pair.tsv"
+rec_target_path <- "/zebrafish.wnt.target.bulk_directionality.tsv"
+pathway <- ImportPathway(lig_table_path = lig_rec_path,
+                         rec_table_path = rec_target_path,
+                         data = logdata,
+                         gene_names = gene_names)
+
+  Pmats_2 <- GetSignalingPartners2(logdata,
+                                gene_names,
+                                pathway$pathway_removed,
+                                manual_colors = c("#9BCD9B", "#3CB371", "#7AC5CD", "#53868B", "#E5E5E5", "#CD9B1D", "#EE7942", "#8968CD", "#CD9B9B", "#CD6889"))
+  
+  SigPlot2(P = Pmats_2$P_agg,
+        cluster_labels = cell_type_labels,
+        lig_cells_per_cluster = 10,
+        rec_cells_per_cluster = 10,
+        rgb_gap = 0.01,
+        title_text = "wnt7aa-fzd10 Signaling Between Cells",
+        manual_colors = c("#9BCD9B", "#3CB371", "#7AC5CD", "#53868B", "#E5E5E5", "#CD9B1D", "#EE7942", "#8968CD", "#CD9B9B", "#CD6889"))
+```
+
+###wnt7bb_lrp5 signaling###
+```{r}
+lig_rec_path <- "/specific_wnt_pairs/wnt7b_lrp5.pair.tsv"
+rec_target_path <- "/zebrafish.wnt.target.bulk_directionality.tsv"
+pathway <- ImportPathway(lig_table_path = lig_rec_path,
+                         rec_table_path = rec_target_path,
+                         data = logdata,
+                         gene_names = gene_names)
+
+  Pmats_2 <- GetSignalingPartners2(logdata,
+                                gene_names,
+                                pathway$pathway_removed,
+                                manual_colors = c("#9BCD9B", "#3CB371", "#7AC5CD", "#53868B", "#E5E5E5", "#CD9B1D", "#EE7942", "#8968CD", "#CD9B9B", "#CD6889"))
+  
+  SigPlot2(P = Pmats_2$P_agg,
+        cluster_labels = cell_type_labels,
+        lig_cells_per_cluster = 10,
+        rec_cells_per_cluster = 10,
+        rgb_gap = 0.01,
+        title_text = "wnt7bb-lrp5 Signaling Between Cells",
+        manual_colors = c("#9BCD9B", "#3CB371", "#7AC5CD", "#53868B", "#E5E5E5", "#CD9B1D", "#EE7942", "#8968CD", "#CD9B9B", "#CD6889"))
+```
+
+
+###wnt7aa_lrp5 signaling###
+```{r}
+lig_rec_path <- "/specific_wnt_pairs/wnt7a_lrp5.pair.tsv"
+rec_target_path <- "/zebrafish.wnt.target.bulk_directionality.tsv"
+pathway <- ImportPathway(lig_table_path = lig_rec_path,
+                         rec_table_path = rec_target_path,
+                         data = logdata,
+                         gene_names = gene_names)
+
+  Pmats_2 <- GetSignalingPartners2(logdata,
+                                gene_names,
+                                pathway$pathway_removed,
+                                manual_colors = c("#9BCD9B", "#3CB371", "#7AC5CD", "#53868B", "#E5E5E5", "#CD9B1D", "#EE7942", "#8968CD", "#CD9B9B", "#CD6889"))
+  
+  SigPlot2(P = Pmats_2$P_agg,
+        cluster_labels = cell_type_labels,
+        lig_cells_per_cluster = 10,
+        rec_cells_per_cluster = 10,
+        rgb_gap = 0.01,
+        title_text = "wnt7aa-lrp5 Signaling Between Cells",
+        manual_colors = c("#9BCD9B", "#3CB371", "#7AC5CD", "#53868B", "#E5E5E5", "#CD9B1D", "#EE7942", "#8968CD", "#CD9B9B", "#CD6889"))
+```
+
+###wnt7aa_atp6ap2 signaling###
+```{r}
+lig_rec_path <- "/specific_wnt_pairs/wnt7a_atp6ap2.pair.tsv"
+rec_target_path <- "/zebrafish.wnt.target.bulk_directionality.tsv"
+pathway <- ImportPathway(lig_table_path = lig_rec_path,
+                         rec_table_path = rec_target_path,
+                         data = logdata,
+                         gene_names = gene_names)
+
+  Pmats_2 <- GetSignalingPartners2(logdata,
+                                gene_names,
+                                pathway$pathway_removed,
+                                manual_colors = c("#9BCD9B", "#3CB371", "#7AC5CD", "#53868B", "#E5E5E5", "#CD9B1D", "#EE7942", "#8968CD", "#CD9B9B", "#CD6889"))
+  
+  SigPlot2(P = Pmats_2$P_agg,
+        cluster_labels = cell_type_labels,
+        lig_cells_per_cluster = 10,
+        rec_cells_per_cluster = 10,
+        rgb_gap = 0.01,
+        title_text = "wnt7aa-atp6ap2 Signaling Between Cells",
+        manual_colors = c("#9BCD9B", "#3CB371", "#7AC5CD", "#53868B", "#E5E5E5", "#CD9B1D", "#EE7942", "#8968CD", "#CD9B9B", "#CD6889"))
+```
+
+
+#####look at expression of receptors over time in the NC#######
+```{r}  
+Arch1_filtered <- readRDS("seurat_objects/Arch1_new_agg_filtered_noNT.RDS")
+Idents(Arch1_filtered) <- "orig.ident"
+hpf14_NC <- subset(Arch1_filtered, idents = "14hpf")
+hpf18_NC <- subset(Arch1_filtered, idents = "18hpf")
+hpf20_NC <- subset(Arch1_filtered, idents = "20hpf")
+hpf24_NC <- subset(Arch1_filtered, idents = "24hpf")
+
+wnt_receptors <- read.table("/wnt.ligand.receptor.pairs.tsv", header = T)
+wnt8_receptors <- read.table("/wnt8.ligand.receptor.pairs.tsv", header = T)
+wnt3_receptors <- wnt_receptors %>% filter(Ligand == "wnt3")
+wnt3a_receptors <- wnt_receptors %>% filter(Ligand == "wnt3a")
+wnt11_receptors <- wnt_receptors %>% filter(Ligand == "wnt11")
+
+hpf14_NC <- AddModuleScore(hpf14_NC, name = "wnt8_receptor_score", features = list("fzd7a"))
+hpf14_NC <- AddModuleScore(hpf14_NC, name = "wnt3_receptor_score", features = list(wnt3_receptors$Receptor))
+hpf14_NC <- AddModuleScore(hpf14_NC, name = "wnt3a_receptor_score", features = list(wnt3a_receptors$Receptor))
+hpf14_NC <- AddModuleScore(hpf14_NC, name = "wnt11_receptor_score", features = list(wnt11_receptors$Receptor))
+hpf14_NC <- AddModuleScore(hpf14_NC, name = "fgf10_receptor_score", features = list(fgf10_receptors$Receptor))
+
+hpf18_NC <- AddModuleScore(hpf18_NC, name = "wnt8_receptor_score", features = list("fzd7a"))
+hpf18_NC <- AddModuleScore(hpf18_NC, name = "wnt3_receptor_score", features = list(wnt3_receptors$Receptor))
+hpf18_NC <- AddModuleScore(hpf18_NC, name = "wnt3a_receptor_score", features = list(wnt3a_receptors$Receptor))
+hpf18_NC <- AddModuleScore(hpf18_NC, name = "wnt11_receptor_score", features = list(wnt11_receptors$Receptor))
+hpf18_NC <- AddModuleScore(hpf18_NC, name = "fgf10_receptor_score", features = list(fgf10_receptors$Receptor))
+
+hpf20_NC <- AddModuleScore(hpf20_NC, name = "wnt8_receptor_score", features = list("fzd7a"))
+hpf20_NC <- AddModuleScore(hpf20_NC, name = "wnt3_receptor_score", features = list(wnt3_receptors$Receptor))
+hpf20_NC <- AddModuleScore(hpf20_NC, name = "wnt3a_receptor_score", features = list(wnt3a_receptors$Receptor))
+hpf20_NC <- AddModuleScore(hpf20_NC, name = "wnt11_receptor_score", features = list(wnt11_receptors$Receptor))
+hpf20_NC <- AddModuleScore(hpf20_NC, name = "fgf10_receptor_score", features = list(fgf10_receptors$Receptor))
+
+hpf24_NC <- AddModuleScore(hpf24_NC, name = "wnt8_receptor_score", features = list("fzd7a"))
+hpf24_NC <- AddModuleScore(hpf24_NC, name = "wnt3_receptor_score", features = list(wnt3_receptors$Receptor))
+hpf24_NC <- AddModuleScore(hpf24_NC, name = "wnt3a_receptor_score", features = list(wnt3a_receptors$Receptor))
+hpf24_NC <- AddModuleScore(hpf24_NC, name = "wnt11_receptor_score", features = list(wnt11_receptors$Receptor))
+hpf24_NC <- AddModuleScore(hpf24_NC, name = "fgf10_receptor_score", features = list(fgf10_receptors$Receptor))
+
+Arch1_filtered <- AddModuleScore(Arch1_filtered, name = "wnt8_receptor_score", features = list("fzd7a"))
+Arch1_filtered <- AddModuleScore(Arch1_filtered, name = "wnt3_receptor_score", features = list(wnt3_receptors$Receptor))
+Arch1_filtered <- AddModuleScore(Arch1_filtered, name = "wnt3a_receptor_score", features = list(wnt3a_receptors$Receptor))
+Arch1_filtered <- AddModuleScore(Arch1_filtered, name = "wnt11_receptor_score", features = list(wnt11_receptors$Receptor))
+Arch1_filtered <- AddModuleScore(Arch1_filtered, name = "fgf10_receptor_score", features = list(fgf10_receptors$Receptor))
+
+  
+###fgf10 receptors###
+fgf10_receptor_df <- data.frame(cell = colnames(Arch1_filtered), score = Arch1_filtered@meta.data$fgf10_receptor_score1, timepoint = Arch1_filtered@meta.data$orig.ident)
+
+fgf10_receptor_df <- fgf10_receptor_df %>% group_by(timepoint) %>% mutate(average_score = mean(score)) %>% select(timepoint, average_score) %>% unique(.)
+fgf10_receptor_df <- as.data.frame(fgf10_receptor_df)
+rownames(fgf10_receptor_df) <- fgf10_receptor_df$timepoint
+fgf10_receptor_df <- fgf10_receptor_df %>% select(average_score)
+fgf10_receptor_df <- as.data.frame(t(fgf10_receptor_df))
+rownames(fgf10_receptor_df) <- "fgf10_receptors"
+
+###wnt3 receptors###
+wnt3_receptor_df <- data.frame(cell = colnames(Arch1_filtered), score = Arch1_filtered@meta.data$wnt3_receptor_score1, timepoint = Arch1_filtered@meta.data$orig.ident)
+
+wnt3_receptor_df <- wnt3_receptor_df %>% group_by(timepoint) %>% mutate(average_score = mean(score)) %>% select(timepoint, average_score) %>% unique(.)
+wnt3_receptor_df <- as.data.frame(wnt3_receptor_df)
+rownames(wnt3_receptor_df) <- wnt3_receptor_df$timepoint
+wnt3_receptor_df <- wnt3_receptor_df %>% select(average_score)
+wnt3_receptor_df <- as.data.frame(t(wnt3_receptor_df))
+rownames(wnt3_receptor_df) <- "wnt3_receptors"
+
+###wnt3a receptors###
+wnt3a_receptor_df <- data.frame(cell = colnames(Arch1_filtered), score = Arch1_filtered@meta.data$wnt3a_receptor_score1, timepoint = Arch1_filtered@meta.data$orig.ident)
+
+wnt3a_receptor_df <- wnt3a_receptor_df %>% group_by(timepoint) %>% mutate(average_score = mean(score)) %>% select(timepoint, average_score) %>% unique(.)
+wnt3a_receptor_df <- as.data.frame(wnt3a_receptor_df)
+rownames(wnt3a_receptor_df) <- wnt3a_receptor_df$timepoint
+wnt3a_receptor_df <- wnt3a_receptor_df %>% select(average_score)
+wnt3a_receptor_df <- as.data.frame(t(wnt3a_receptor_df))
+rownames(wnt3a_receptor_df) <- "wnt3a_receptors"
+
+###wnt8 receptors###
+wnt8_receptor_df <- data.frame(cell = colnames(Arch1_filtered), score = Arch1_filtered@meta.data$wnt8_receptor_score1, timepoint = Arch1_filtered@meta.data$orig.ident)
+
+wnt8_receptor_df <- wnt8_receptor_df %>% group_by(timepoint) %>% mutate(average_score = mean(score)) %>% select(timepoint, average_score) %>% unique(.)
+wnt8_receptor_df <- as.data.frame(wnt8_receptor_df)
+rownames(wnt8_receptor_df) <- wnt8_receptor_df$timepoint
+wnt8_receptor_df <- wnt8_receptor_df %>% select(average_score)
+wnt8_receptor_df <- as.data.frame(t(wnt8_receptor_df))
+rownames(wnt8_receptor_df) <- "wnt8_receptors"
+
+###wnt11 receptors###
+wnt11_receptor_df <- data.frame(cell = colnames(Arch1_filtered), score = Arch1_filtered@meta.data$wnt11_receptor_score1, timepoint = Arch1_filtered@meta.data$orig.ident)
+
+wnt11_receptor_df <- wnt11_receptor_df %>% group_by(timepoint) %>% mutate(average_score = mean(score)) %>% select(timepoint, average_score) %>% unique(.)
+wnt11_receptor_df <- as.data.frame(wnt11_receptor_df)
+rownames(wnt11_receptor_df) <- wnt11_receptor_df$timepoint
+wnt11_receptor_df <- wnt11_receptor_df %>% select(average_score)
+wnt11_receptor_df <- as.data.frame(t(wnt11_receptor_df))
+rownames(wnt11_receptor_df) <- "wnt11_receptors"
+
+receptors_timeline <- rbind(fgf10_receptor_df, wnt3a_receptor_df, wnt3a_receptor_df, wnt8_receptor_df, wnt11_receptor_df)
+
+pheatmap(receptors_timeline, cluster_rows = F, cluster_cols = F,scale = "row")
+
+
+
+###a bunch of receptors individually###
+zebrafish.wnt.pairs <- read.table("/wnt.ligand.receptor.pairs.tsv", header = T)
+zebrafish.bmp.pairs <- read.table("/bmp.ligand.receptor.pairs.tsv", header = T)
+zebrafish.fgf.pairs <- read.table("/fgf.ligand.receptor.pairs.tsv", header = T)
+
+zebrafish.wnt.receptors <- as.character(unique(zebrafish.wnt.pairs$Receptor))
+zebrafish.fgf.receptors <- c(as.character(unique(zebrafish.fgf.pairs$Receptor)),"fgfr1bl.1")
+zebrafish.bmp.receptors <- as.character(unique(zebrafish.bmp.pairs$Receptor))
+
+averages <- AverageExpression(Arch1_filtered)
+receptors <- c(zebrafish.wnt.receptors, zebrafish.fgf.receptors, zebrafish.bmp.receptors)
+
+plot_df <- unique(drop_na(averages$RNA[which(rownames(averages$RNA) %in% receptors),]))
+plot_df <- plot_df[rowSums(plot_df)>0,]
+
+plot_df_annotations <- plot_df %>%
+  mutate(gene = rownames(plot_df)) %>%
+  mutate(pathway = ifelse(gene %in% zebrafish.wnt.receptors, "WNT",
+                          ifelse(gene %in% zebrafish.fgf.receptors,"FGF",
+                                 ifelse(gene %in% zebrafish.bmp.receptors, "BMP",NA)))) %>%
+  filter(!is.na(pathway)) %>%
+  gather(`12hpf`:`30hpf`,key="timepoint",value="expression") %>%
+  group_by(gene) %>%
+  mutate(max_timepoint = ifelse(expression == max(expression), timepoint,NA)) %>%
+  filter(!is.na(max_timepoint)) %>%
+  arrange(pathway,max_timepoint)
+
+pheatmap(plot_df[as.character(plot_df_annotations$gene),], scale = "row", cluster_cols = F, cluster_rows = F, 
+         gaps_row = cumsum(table(plot_df_annotations$pathway))[1:2])
+```

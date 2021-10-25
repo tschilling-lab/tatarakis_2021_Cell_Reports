@@ -1,0 +1,71 @@
+---
+title: "doublet_detection"
+author: "David Tatarakis"
+date: "10/25/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+### Doublet Detection (unflitered arch)
+```{r}
+arch1 <- readRDS("seurat_objects/Arch1_aggregate_unfiltered.RDS")
+
+params_sweep <- DoubletFinder::paramSweep_v3(seu = arch1, PCs = 1:13, sct = FALSE)
+params_sweep_sum <- DoubletFinder::summarizeSweep(params_sweep, GT = FALSE)
+pk_arch1 <- DoubletFinder::find.pK(sweep.stats = params_sweep_sum)
+
+homotypic.prop <- DoubletFinder::modelHomotypic(annotations = arch1@meta.data$guided_cell_type)          
+nExp_poi <- round(0.1*nrow(arch1@meta.data))  
+nExp_poi.adj <- round(nExp_poi*(1-homotypic.prop))
+
+
+
+arch1_doublet_output <- DoubletFinder::doubletFinder_v3(seu = arch1, 
+                             PCs = 1:13, 
+                             pK = 0.15, 
+                             nExp = nExp_poi.adj, 
+                             reuse.pANN = FALSE,
+                             sct = FALSE)
+
+DimPlot(arch1_doublet_output, group.by = "DF.classifications_0.25_0.15_157", reduction = "umap") + 
+  DimPlot(arch1, group.by = "guided_cell_type", reduction = "umap")
+
+FeaturePlot(arch1_doublet_output, "pANN_0.25_0.15_157", reduction = "umap")+ 
+  DimPlot(arch1, group.by = "guided_cell_type", reduction = "umap")
+
+VlnPlot(arch1_doublet_output, features = "pANN_0.25_0.15_157", group.by = "guided_cell_type")
+```
+
+### Doublet Detection
+```{r}
+arch1 <- readRDS("seurat_objects/Arch1_new_agg_filtered_noNT.RDS")
+
+params_sweep <- DoubletFinder::paramSweep_v3(seu = arch1, PCs = 1:5, sct = FALSE)
+params_sweep_sum <- DoubletFinder::summarizeSweep(params_sweep, GT = FALSE)
+pk_arch1 <- DoubletFinder::find.pK(sweep.stats = params_sweep_sum)
+
+homotypic.prop <- modelHomotypic(annotations = arch1@meta.data$guided_cell_type)          
+nExp_poi <- round(0.05*nrow(arch1@meta.data))  
+nExp_poi.adj <- round(nExp_poi*(1-homotypic.prop))
+
+
+
+arch1_doublet_output <- DoubletFinder::doubletFinder_v3(seu = arch1, 
+                             PCs = 1:5, 
+                             pK = 0.14, 
+                             nExp = nExp_poi.adj, 
+                             reuse.pANN = FALSE,
+                             sct = FALSE)
+
+DimPlot(arch1_doublet_output, group.by = "DF.classifications_0.25_0.14_44", reduction = "tsne") + 
+  DimPlot(arch1, group.by = "guided_cell_type", reduction = "tsne")
+
+FeaturePlot(arch1_doublet_output, "pANN_0.25_0.14_44", reduction = "tsne")+ 
+  DimPlot(arch1, group.by = "guided_cell_type", reduction = "tsne")
+
+VlnPlot(arch1_doublet_output, features = "pANN_0.25_0.14_44", group.by = "guided_cell_type")
+```

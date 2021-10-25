@@ -1,0 +1,98 @@
+---
+title: "image_analysis"
+author: "David Tatarakis"
+date: "10/25/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+###foxd3 image quantification###
+```{r}
+foxd3_quant <- as.data.frame(read.csv("foxd3_quantification2.csv", header = T))
+colnames(foxd3_quant)[1] <- "stage"
+foxd3_quant$stage <- as.character(foxd3_quant$stage)
+comparisons <- list(c("12","18"), c("12", "24"), c("18", "24"))
+
+ggplot(foxd3_quant, aes(x = stage, y = ctcf)) + 
+  geom_point() + 
+  theme_bw() +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult=1), geom = "errorbar", color = "black", width = 0.5) +
+  stat_summary(fun = mean, geom = "point", color = "black", shape = 3, size = 4) +
+  stat_compare_means(comparisons = comparisons, aes(label = ..p.adj..)) + 
+  stat_compare_means(label.y = 5e+05)  
+
+###12hpf = 278640, 18hpf = 48478, 24 hpf = 118584 
+foxd3_quant %>% group_by(stage) %>% summarise_each(funs = c(mean))
+foxd3_quant %>% group_by(stage) %>% count()
+
+compare_means(ctcf ~ stage,data = foxd3_quant)
+```
+
+###mitfa image quantification###
+```{r}
+mitfa_quant <- as.data.frame(read.csv("mitfa_quantification.csv", header = T))
+mitfa_quant$Condition <- factor(x = mitfa_quant$Condition, levels = c("control","atp6ap2"))
+comparisons <- list(c("control","atp6ap2"))
+
+ggplot(mitfa_quant, aes(x = Condition, y = ctcf)) + 
+  geom_point() + 
+  theme_bw() +
+  ylim(10000, 55000) +
+  stat_summary(fun.data = mean_sdl, fun.args = list(mult=1), geom = "errorbar", color = "black", width = 0.5) +
+  stat_summary(fun = mean, geom = "point", color = "black", shape = 3, size = 4) +
+  stat_compare_means(comparisons = comparisons, aes(label = ..p.adj..)) + 
+  stat_compare_means(label.y = 5.25e+04)  
+
+compare_means(ctcf ~ Condition,data = mitfa_quant)
+```
+
+###atp6ap2 mitfa quantification###
+```{r}
+
+mitfa_quant <- as.data.frame(read.csv("mitfa_quantification.csv", header = T))
+head(mitfa_quant)
+mitfa_quant$Condition <- factor(x = mitfa_quant$Condition, levels = c("control","atp6ap2"))
+comparisons <- list(c("control", "atp6ap2"))
+
+
+ggplot(mitfa_quant, aes(x = Condition, y = ctcf)) + 
+     geom_point() + 
+     theme_bw() +
+     ylim(10000, 55000) +
+     stat_summary(fun.data = mean_sdl, fun.args = list(mult=1), geom = "errorbar", color = "black", width = 0.5) +
+     stat_summary(fun = mean, geom = "point", color = "black", shape = 3, size = 4) +
+     stat_compare_means(comparisons = comparisons, aes(label = ..p.adj..)) + 
+     stat_compare_means(label.y = 5.25e+04)  
+compare_means(ctcf ~ Condition,data = mitfa_quant)
+
+mitfa_quant %>% group_by(Condition) %>% summarise_each(funs = c(mean))
+```
+
+
+
+###atp6ap2 TCF quantification###
+```{r}
+TCF_quant <- read.csv("atp6ap2_mitfa_TCF_quantification.csv", header = T)
+head(TCF_quant)
+TCF_quant$Condition <- factor(TCF_quant$Condition, levels = c("Cas9_ctrl", "atp6ap2_crispr"))
+
+comparisons <- list(c("Cas9_ctrl", "atp6ap2_crispr"))
+
+ggplot(TCF_quant, aes(x = Condition, y = ctcf)) + 
+     geom_point() + 
+     theme_bw() +
+     ylim(0, 400000) +
+     stat_summary(fun.data = mean_sdl, fun.args = list(mult=1), geom = "errorbar", color = "black", width = 0.5) +
+     stat_summary(fun = mean, geom = "point", color = "black", shape = 3, size = 4) +
+     stat_compare_means(comparisons = comparisons, aes(label = ..p.adj..)) + 
+     stat_compare_means(label.y = 3.75e+05)  
+compare_means(ctcf ~ Condition,data = TCF_quant)
+
+TCF_quant %>% group_by(Condition) %>% summarise_each(funs = c(mean))
+###cas9 = 193407   CRISPR = 49567
+
+```

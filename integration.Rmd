@@ -1,0 +1,47 @@
+---
+title: "integration"
+author: "David Tatarakis"
+date: "10/25/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Integration
+```{r}
+Arch1_unfiltered <- readRDS("Arch1_aggregate_unfiltered.RDS")
+arch1 <- readRDS("Arch1_new_agg_filtered_noNT.RDS")
+
+
+arch1_list <- SplitObject(Arch1_unfiltered, split.by = "orig.ident")
+arch1_list2 <- arch1_list[1:5]
+
+features <- SelectIntegrationFeatures(object.list = arch1_list2)
+anchors <- FindIntegrationAnchors(object.list = arch1_list2, anchor.features = features)
+
+arch1.integrated <- IntegrateData(anchorset = anchors)
+
+
+arch1.integrated <- arch1.integrated %>%
+                            ScaleData(.) %>%
+                            RunPCA(.)
+ElbowPlot(arch1.integrated)
+
+arch1.integrated <- arch1.integrated %>%
+                            RunUMAP(., dims = 1:20) %>%
+                            FindNeighbors(., dims = 1:20) %>%
+                            FindClusters(., resolution = 0.6)
+
+DimPlot(arch1.integrated, group.by = "Cell.Type")
+
+###Just Neural Crest
+
+arch1.NC.integrated <- subset(arch1.integrated, subset = Cell.Type == "NC")
+
+arch1.NC.integrated <- arch1.NC.integrated %>%
+                            ScaleData(.) %>%
+                            RunPCA(.)
+ElbowPlot(arch1.NC.integrated)
+```
