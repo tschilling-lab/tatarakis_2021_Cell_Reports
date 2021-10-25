@@ -1,0 +1,13 @@
+R 3.6.3
+
+dyno_0.1.2
+dynwrap_1.2.2
+dynutils_1.0.6
+dynplot_1.0.2.9000
+tidyverse_1.3.0
+cellassign
+loomR
+Seurat
+tradeSeq_1.0.1
+SingleCellExperiment_1.8.0
+clusterExperiment_2.6.1
